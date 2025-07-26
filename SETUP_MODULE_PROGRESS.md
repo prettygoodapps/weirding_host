@@ -39,6 +39,7 @@
 **Available Commands:**
 - `python main.py setup-module` - Interactive Weirding Module setup
 - `python main.py list-drives` - List all detected drives with suitability
+- `python main.py relabel-drive` - Relabel external drives for easy identification
 - `python main.py setup-host` - Host system preparation (placeholder)
 - `python main.py version` - Version information
 
@@ -54,6 +55,17 @@
 - Multiple confirmation prompts for destructive operations
 - Drive path verification for critical operations
 - Mount status checking and warnings
+
+### 6. ✅ Drive Relabeling System
+**NEW: Advanced Drive Labeling Capabilities:**
+- **Module Name Configuration**: Interactive naming with suggested options
+- **Filesystem Support**: ext2/3/4 (e2label), FAT32/exFAT (fatlabel), NTFS (ntfslabel)
+- **Root Privilege Checking**: Secure operations with proper permission validation
+- **Automatic Unmounting**: Safe drive unmounting before relabeling operations
+- **Input Validation**: 11-character limit, alphanumeric/underscore/hyphen sanitization
+- **Error Handling**: Comprehensive error messages with helpful user guidance
+- **Progress Tracking**: Visual feedback during relabeling operations
+- **Standalone Command**: `python main.py relabel-drive` for quick drive renaming
 
 ## 🚧 Next Steps - Implementation Roadmap
 

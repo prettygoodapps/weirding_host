@@ -277,6 +277,221 @@ class DriveDetector:
         return len(issues) == 0, issues
 
 
+    def relabel_drive(self, drive: DriveInfo, new_label: str) -> Tuple[bool, str]:
+        """
+        Relabel a drive with a new filesystem label.
+        
+        Args:
+            drive: DriveInfo object for the drive to relabel
+            new_label: New label to assign to the drive
+            
+        Returns:
+            Tuple of (success, message)
+        """
+        import os
+        import time
+        
+        if not new_label or len(new_label.strip()) == 0:
+            return False, "Label cannot be empty"
+        
+        # Check if running as root
+        if os.geteuid() != 0:
+            return False, "Root privileges required for drive relabeling. Please run with sudo."
+        
+        # Sanitize label - remove invalid characters
+        sanitized_label = re.sub(r'[^a-zA-Z0-9_-]', '_', new_label.strip())
+        
+        # Limit label length (filesystem dependent, but 11 chars is safe for most)
+        if len(sanitized_label) > 11:
+            sanitized_label = sanitized_label[:11]
+        
+        try:
+            # Force unmount all partitions on the drive first
+            self._force_unmount_drive(drive.device)
+            
+            # Wait a moment for the system to recognize the unmount
+            time.sleep(1)
+            
+            # Refresh drive information to get current state
+            refreshed_drive = self._refresh_drive_info(drive.device)
+            if not refreshed_drive:
+                return False, f"Could not refresh drive information for {drive.device}"
+            
+            # Determine the filesystem type and use appropriate labeling command
+            if len(refreshed_drive.partitions) > 0:
+                partition = refreshed_drive.partitions[0]  # Use first partition
+                partition_device = partition['name']
+                fstype = partition['fstype']
+                
+                # If no filesystem type detected, try to detect it manually
+                if not fstype:
+                    fstype = self._detect_filesystem_type(partition_device)
+                
+                if not fstype:
+                    return False, f"Could not determine filesystem type for {partition_device}. Drive may need to be formatted first."
+                
+                if fstype in ['ext2', 'ext3', 'ext4']:
+                    # Use e2label for ext filesystems
+                    result = subprocess.run([
+                        'e2label', partition_device, sanitized_label
+                    ], capture_output=True, text=True, check=True)
+                    
+                elif fstype in ['fat32', 'vfat', 'exfat']:
+                    # Use fatlabel for FAT filesystems - convert to uppercase for compatibility
+                    upper_label = sanitized_label.upper()
+                    result = subprocess.run([
+                        'fatlabel', partition_device, upper_label
+                    ], capture_output=True, text=True, check=True)
+                    sanitized_label = upper_label  # Update for return message
+                    
+                elif fstype == 'ntfs':
+                    # Use ntfslabel for NTFS filesystems
+                    result = subprocess.run([
+                        'ntfslabel', partition_device, sanitized_label
+                    ], capture_output=True, text=True, check=True)
+                    
+                else:
+                    return False, f"Unsupported filesystem type: {fstype}. Supported: ext2/3/4, FAT32, exFAT, NTFS"
+                
+                return True, f"Successfully relabeled {partition_device} to '{sanitized_label}'"
+            
+            else:
+                return False, "No partitions found on drive"
+                
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr.strip() if e.stderr else str(e)
+            # Filter out warnings that don't indicate failure
+            if "warning" in error_msg.lower() and "permission denied" not in error_msg.lower():
+                return True, f"Successfully relabeled {partition_device} to '{sanitized_label}' (with warnings)"
+            return False, f"Failed to relabel drive: {error_msg}"
+        except Exception as e:
+            return False, f"Unexpected error during relabeling: {str(e)}"
+    
+    def _force_unmount_drive(self, device_path: str):
+        """
+        Force unmount all partitions on a drive.
+        
+        Args:
+            device_path: Path to the drive device (e.g., /dev/sdc)
+        """
+        try:
+            # Get all mounted partitions for this device
+            result = subprocess.run(['mount'], capture_output=True, text=True)
+            mount_lines = result.stdout.split('\n')
+            
+            partitions_to_unmount = []
+            for line in mount_lines:
+                if device_path in line:
+                    parts = line.split()
+                    if len(parts) > 0:
+                        partition = parts[0]
+                        partitions_to_unmount.append(partition)
+            
+            # Unmount each partition
+            for partition in partitions_to_unmount:
+                try:
+                    subprocess.run(['umount', partition], capture_output=True, text=True, check=True)
+                except subprocess.CalledProcessError:
+                    # Try lazy unmount if regular unmount fails
+                    try:
+                        subprocess.run(['umount', '-l', partition], capture_output=True, text=True, check=True)
+                    except subprocess.CalledProcessError:
+                        pass  # Continue with other partitions
+            
+            # Also try to unmount the device itself
+            try:
+                subprocess.run(['umount', device_path], capture_output=True, text=True)
+            except subprocess.CalledProcessError:
+                pass
+                
+        except Exception:
+            pass  # Ignore errors in unmounting
+    
+    def _refresh_drive_info(self, device_path: str) -> Optional[DriveInfo]:
+        """
+        Refresh drive information for a specific device.
+        
+        Args:
+            device_path: Path to the drive device (e.g., /dev/sdc)
+            
+        Returns:
+            Updated DriveInfo object or None if not found
+        """
+        try:
+            # Extract device name from path
+            device_name = device_path.replace('/dev/', '')
+            
+            # Use lsblk to get updated information
+            result = subprocess.run([
+                'lsblk', '-J', '-o',
+                'NAME,SIZE,MODEL,VENDOR,SERIAL,RM,MOUNTPOINT,FSTYPE,TYPE,TRAN',
+                device_path
+            ], capture_output=True, text=True, check=True)
+            
+            lsblk_data = json.loads(result.stdout)
+            
+            for device in lsblk_data.get('blockdevices', []):
+                if device.get('type') == 'disk' and device['name'] == device_name:
+                    return self._parse_drive_info(device)
+            
+        except (subprocess.CalledProcessError, json.JSONDecodeError):
+            pass
+        
+        return None
+    
+    def _detect_filesystem_type(self, partition_device: str) -> Optional[str]:
+        """
+        Detect filesystem type using blkid.
+        
+        Args:
+            partition_device: Path to partition device (e.g., /dev/sdc1)
+            
+        Returns:
+            Filesystem type or None if not detected
+        """
+        try:
+            result = subprocess.run([
+                'blkid', '-s', 'TYPE', '-o', 'value', partition_device
+            ], capture_output=True, text=True, check=True)
+            
+            fstype = result.stdout.strip()
+            return fstype if fstype else None
+            
+        except subprocess.CalledProcessError:
+            return None
+    
+    def get_current_label(self, drive: DriveInfo) -> Optional[str]:
+        """
+        Get the current filesystem label of a drive.
+        
+        Args:
+            drive: DriveInfo object for the drive
+            
+        Returns:
+            Current label or None if not found
+        """
+        try:
+            if len(drive.partitions) > 0:
+                partition = drive.partitions[0]
+                partition_device = partition['name']
+                
+                # Use blkid to get filesystem information
+                result = subprocess.run([
+                    'blkid', '-s', 'LABEL', '-o', 'value', partition_device
+                ], capture_output=True, text=True, check=True)
+                
+                label = result.stdout.strip()
+                return label if label else None
+                
+        except subprocess.CalledProcessError:
+            # No label found or command failed
+            return None
+        except Exception:
+            return None
+        
+        return None
+
+
 def main():
     """Test the drive detection functionality."""
     detector = DriveDetector()
@@ -292,6 +507,11 @@ def main():
         print(f"Connection: {drive.connection_type}")
         print(f"External: {drive.is_external}")
         print(f"Mounted: {drive.mounted}")
+        
+        # Show current label
+        current_label = detector.get_current_label(drive)
+        if current_label:
+            print(f"Current Label: {current_label}")
         
         if drive.mount_points:
             print(f"Mount points: {', '.join(drive.mount_points)}")
@@ -311,7 +531,10 @@ def main():
         print("=" * 50)
         for drive in external_drives:
             analysis = detector.analyze_drive_usage(drive)
+            current_label = detector.get_current_label(drive)
             print(f"\n{drive.device} - {drive.model}")
+            if current_label:
+                print(f"  Current Label: {current_label}")
             print(f"  Size: {detector.format_size(drive.size)}")
             print(f"  Used: {detector.format_size(analysis['used_space'])}")
             print(f"  Free: {detector.format_size(analysis['free_space'])}")

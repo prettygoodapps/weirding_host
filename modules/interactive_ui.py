@@ -17,6 +17,7 @@ from rich.layout import Layout
 from rich.align import Align
 from typing import List, Dict, Optional, Tuple
 import time
+import subprocess
 
 from device_setup import DriveInfo, DriveDetector
 
@@ -273,7 +274,172 @@ Always backup important data before proceeding.
         
         return selected_mode
     
-    def show_setup_summary(self, drive: DriveInfo, mode: str, analysis: Dict) -> bool:
+    def configure_module_name(self, drive: DriveInfo) -> Optional[str]:
+        """
+        Allow user to configure the Weirding Module name/label.
+        
+        Args:
+            drive: DriveInfo object for the selected drive
+            
+        Returns:
+            New label name or None if cancelled
+        """
+        current_label = self.detector.get_current_label(drive)
+        
+        # Show current label information
+        label_info = f"""
+[bold blue]Weirding Module Name Configuration[/bold blue]
+
+[yellow]Current Drive Label:[/yellow] {current_label if current_label else 'No label set'}
+
+[blue]About Module Names:[/blue]
+• The module name will be used as the drive label and hostname
+• Choose a descriptive name for easy identification
+• Names are limited to 11 characters (alphanumeric, underscore, hyphen)
+• Examples: 'AI_Server', 'WeirdingAI', 'MyAIBox', 'PortableML'
+
+[green]Suggested Names:[/green]
+• Based on your drive: 'T7_AI_Server' or 'Samsung_AI'
+• Generic options: 'WeirdingAI', 'PortableAI', 'AIModule'
+        """
+        
+        panel = Panel(
+            label_info.strip(),
+            title="🏷️ Module Name Configuration",
+            border_style="blue",
+            padding=(1, 2)
+        )
+        
+        self.console.print(panel)
+        
+        # Provide naming options
+        naming_choices = [
+            {
+                'name': '🎯 Use suggested name: "WeirdingAI"',
+                'value': 'WeirdingAI'
+            },
+            {
+                'name': '🔧 Use drive-based name: "T7_AI"',
+                'value': 'T7_AI'
+            },
+            {
+                'name': '✏️ Enter custom name',
+                'value': 'custom'
+            },
+            {
+                'name': '📋 Keep current label' + (f' ("{current_label}")' if current_label else ' (no change)'),
+                'value': 'keep'
+            }
+        ]
+        
+        choice = questionary.select(
+            "Choose how to name your Weirding Module:",
+            choices=naming_choices,
+            style=questionary.Style([
+                ('question', 'bold'),
+                ('answer', 'fg:#ff9d00 bold'),
+                ('pointer', 'fg:#ff9d00 bold'),
+                ('highlighted', 'fg:#ff9d00 bold'),
+            ])
+        ).ask()
+        
+        if not choice:
+            return None
+        
+        if choice == 'keep':
+            return current_label
+        elif choice == 'custom':
+            # Get custom name from user
+            while True:
+                custom_name = questionary.text(
+                    "Enter custom name for your Weirding Module:",
+                    validate=lambda text: len(text.strip()) > 0 and len(text.strip()) <= 11,
+                    instruction="(1-11 characters, alphanumeric/underscore/hyphen only)"
+                ).ask()
+                
+                if not custom_name:
+                    return None
+                
+                # Validate and sanitize
+                import re
+                sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', custom_name.strip())
+                
+                if sanitized != custom_name.strip():
+                    self.console.print(f"[yellow]Name sanitized to: '{sanitized}'[/yellow]")
+                    if not questionary.confirm(f"Use '{sanitized}' as the module name?").ask():
+                        continue
+                
+                return sanitized
+        else:
+            return choice
+    
+    def apply_drive_label(self, drive: DriveInfo, new_label: str) -> bool:
+        """
+        Apply the new label to the drive with user feedback.
+        
+        Args:
+            drive: DriveInfo object for the drive
+            new_label: New label to apply
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not new_label:
+            return True  # No change requested
+        
+        current_label = self.detector.get_current_label(drive)
+        if current_label == new_label:
+            self.console.print(f"[green]Drive already has the label '{new_label}'[/green]")
+            return True
+        
+        self.console.print(f"\n[blue]Applying label '{new_label}' to {drive.device}...[/blue]")
+        
+        # Check if drive needs to be unmounted
+        if drive.mounted:
+            self.console.print("[yellow]Drive is currently mounted. Attempting to unmount...[/yellow]")
+            
+            try:
+                # Attempt to unmount all mount points
+                for mount_point in drive.mount_points:
+                    result = subprocess.run(['umount', mount_point],
+                                          capture_output=True, text=True, check=True)
+                self.console.print("[green]Drive unmounted successfully.[/green]")
+                
+                # Update drive status
+                drive.mounted = False
+                drive.mount_points = []
+                
+            except subprocess.CalledProcessError as e:
+                self.show_error("Unmount Failed",
+                              f"Could not unmount drive: {e.stderr.strip() if e.stderr else str(e)}")
+                return False
+        
+        # Apply the label
+        with self.show_progress_screen("Applying Label") as progress:
+            task = progress.add_task("Relabeling drive...", total=100)
+            
+            success, message = self.detector.relabel_drive(drive, new_label)
+            progress.update(task, completed=100)
+        
+        if success:
+            self.console.print(f"[green]✅ {message}[/green]")
+            return True
+        else:
+            # Check if it's a permission error and provide helpful guidance
+            if "Root privileges required" in message:
+                self.show_error("Permission Required",
+                              "Drive relabeling requires root privileges.\n\n" +
+                              "Please run with sudo using the virtual environment:\n" +
+                              "sudo ./venv/bin/python main.py setup-module\n" +
+                              "or\n" +
+                              "sudo ./venv/bin/python main.py relabel-drive\n\n" +
+                              "Alternatively, activate the virtual environment first:\n" +
+                              "source venv/bin/activate && sudo python main.py setup-module")
+            else:
+                self.show_error("Labeling Failed", message)
+            return False
+    
+    def show_setup_summary(self, drive: DriveInfo, mode: str, analysis: Dict, module_name: str = None) -> bool:
         """Show final setup summary and get confirmation."""
         
         if mode == 'full_wipe':
@@ -318,6 +484,7 @@ Always backup important data before proceeding.
 [bold]Model:[/bold] {drive.model} ({drive.vendor})
 [bold]Size:[/bold] {self.detector.format_size(drive.size)}
 [bold]Mode:[/bold] {mode.replace('_', ' ').title()}
+[bold]Module Name:[/bold] {module_name if module_name else 'No custom name set'}
 
 {impact_text}
 
@@ -461,9 +628,13 @@ def main():
     analysis = ui.show_drive_analysis(selected_drive)
     mode = ui.select_setup_mode(selected_drive, analysis)
     
-    if mode and ui.show_setup_summary(selected_drive, mode, analysis):
-        ui.console.print("\n[green]Setup would proceed here...[/green]")
-        ui.show_completion_summary(selected_drive, mode)
+    if mode:
+        module_name = ui.configure_module_name(selected_drive)
+        if module_name is not None:
+            if ui.apply_drive_label(selected_drive, module_name):
+                if ui.show_setup_summary(selected_drive, mode, analysis, module_name):
+                    ui.console.print("\n[green]Setup would proceed here...[/green]")
+                    ui.show_completion_summary(selected_drive, mode)
 
 
 if __name__ == "__main__":

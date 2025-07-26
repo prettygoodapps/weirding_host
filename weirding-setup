@@ -1,0 +1,528 @@
+#!/usr/bin/env python3
+"""
+Weirding Module Setup Utility - Standalone Version
+
+A standalone command-line tool to configure external drives as portable AI servers 
+(Weirding Modules) and to prepare host systems to use them.
+
+This script can be run directly from the terminal without virtual environment setup.
+"""
+
+import sys
+import os
+import subprocess
+import json
+import re
+import time
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass
+
+# Check for required packages and install if missing
+def check_and_install_dependencies():
+    """Check for required packages and install them if missing."""
+    required_packages = ['typer', 'rich', 'questionary']
+    missing_packages = []
+    
+    for package in required_packages:
+        try:
+            __import__(package)
+        except ImportError:
+            missing_packages.append(package)
+    
+    if missing_packages:
+        print(f"Missing dependencies: {', '.join(missing_packages)}")
+        print("\nPlease install the required packages using one of these methods:")
+        print(f"1. Using pip: pip install --user {' '.join(missing_packages)}")
+        print(f"2. Using apt: sudo apt install python3-{' python3-'.join(missing_packages)}")
+        print("3. Using the virtual environment in this directory:")
+        print("   source venv/bin/activate")
+        print("   pip install -r requirements.txt")
+        print("\nAfter installation, run this command again.")
+        sys.exit(1)
+
+# Install dependencies if needed
+check_and_install_dependencies()
+
+# Now import the required packages
+import typer
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from rich.prompt import Confirm
+import questionary
+
+
+@dataclass
+class DriveInfo:
+    """Information about a storage device."""
+    device: str
+    size: int
+    model: str
+    vendor: str
+    serial: str
+    removable: bool
+    mounted: bool
+    mount_points: List[str]
+    partitions: List[Dict]
+    filesystem_type: Optional[str]
+    usage_percent: Optional[float]
+    is_external: bool
+    connection_type: str
+
+
+class DriveDetector:
+    """Detects and analyzes storage devices for Weirding Module setup."""
+    
+    def __init__(self):
+        self.detected_drives: List[DriveInfo] = []
+    
+    def scan_drives(self) -> List[DriveInfo]:
+        """Scan system for all storage devices and identify external drives."""
+        self.detected_drives = []
+        
+        try:
+            result = subprocess.run([
+                'lsblk', '-J', '-o', 
+                'NAME,SIZE,MODEL,VENDOR,SERIAL,RM,MOUNTPOINT,FSTYPE,TYPE,TRAN'
+            ], capture_output=True, text=True, check=True)
+            
+            lsblk_data = json.loads(result.stdout)
+            
+            for device in lsblk_data.get('blockdevices', []):
+                if device.get('type') == 'disk':
+                    drive_info = self._parse_drive_info(device)
+                    if drive_info:
+                        self.detected_drives.append(drive_info)
+            
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+            print(f"Error scanning drives: {e}")
+            return []
+        
+        return self.detected_drives
+    
+    def _parse_drive_info(self, device_data: Dict) -> Optional[DriveInfo]:
+        """Parse lsblk device data into DriveInfo object."""
+        try:
+            device_name = f"/dev/{device_data['name']}"
+            size_str = device_data.get('size', '0')
+            size_bytes = self._parse_size_to_bytes(size_str)
+            
+            is_removable = device_data.get('rm') == '1'
+            connection_type = device_data.get('tran', 'unknown').upper()
+            is_external = is_removable or connection_type == 'USB'
+            
+            partitions = []
+            mount_points = []
+            mounted = False
+            
+            if 'children' in device_data:
+                for child in device_data['children']:
+                    partition_info = {
+                        'name': f"/dev/{child['name']}",
+                        'size': child.get('size', ''),
+                        'fstype': child.get('fstype', ''),
+                        'mountpoint': child.get('mountpoint', '')
+                    }
+                    partitions.append(partition_info)
+                    
+                    if child.get('mountpoint'):
+                        mount_points.append(child['mountpoint'])
+                        mounted = True
+            
+            main_mountpoint = device_data.get('mountpoint')
+            if main_mountpoint:
+                mount_points.append(main_mountpoint)
+                mounted = True
+            
+            return DriveInfo(
+                device=device_name,
+                size=size_bytes,
+                model=(device_data.get('model') or 'Unknown').strip(),
+                vendor=(device_data.get('vendor') or 'Unknown').strip(),
+                serial=(device_data.get('serial') or 'Unknown').strip(),
+                removable=is_removable,
+                mounted=mounted,
+                mount_points=mount_points,
+                partitions=partitions,
+                filesystem_type=device_data.get('fstype'),
+                usage_percent=None,
+                is_external=is_external,
+                connection_type=connection_type
+            )
+            
+        except Exception as e:
+            print(f"Error parsing device data: {e}")
+            return None
+    
+    def _parse_size_to_bytes(self, size_str: str) -> int:
+        """Convert size string to bytes."""
+        if not size_str:
+            return 0
+        
+        size_str = size_str.strip()
+        match = re.match(r'([0-9.]+)([KMGTPE]?)', size_str.upper())
+        if not match:
+            return 0
+        
+        number = float(match.group(1))
+        unit = match.group(2)
+        
+        multipliers = {
+            '': 1, 'K': 1024, 'M': 1024**2, 'G': 1024**3,
+            'T': 1024**4, 'P': 1024**5, 'E': 1024**6
+        }
+        
+        return int(number * multipliers.get(unit, 1))
+    
+    def get_external_drives(self) -> List[DriveInfo]:
+        """Get only external/removable drives suitable for Weirding Module setup."""
+        return [drive for drive in self.detected_drives if drive.is_external]
+    
+    def format_size(self, bytes_size: int) -> str:
+        """Format byte size into human-readable string."""
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
+            if bytes_size < 1024.0:
+                return f"{bytes_size:.1f} {unit}"
+            bytes_size /= 1024.0
+        return f"{bytes_size:.1f} EB"
+    
+    def check_drive_requirements(self, drive: DriveInfo) -> Tuple[bool, List[str]]:
+        """Check if drive meets minimum requirements for Weirding Module."""
+        issues = []
+        
+        min_size = 32 * 1024**3  # 32GB
+        if drive.size < min_size:
+            issues.append(f"Drive too small: {self.format_size(drive.size)} < {self.format_size(min_size)}")
+        
+        if not drive.is_external:
+            issues.append("Drive does not appear to be external/removable")
+        
+        if drive.connection_type not in ['USB', 'UNKNOWN']:
+            issues.append(f"Unusual connection type: {drive.connection_type}")
+        
+        return len(issues) == 0, issues
+    
+    def get_current_label(self, drive: DriveInfo) -> Optional[str]:
+        """Get the current filesystem label of a drive."""
+        try:
+            if len(drive.partitions) > 0:
+                partition = drive.partitions[0]
+                partition_device = partition['name']
+                
+                result = subprocess.run([
+                    'blkid', '-s', 'LABEL', '-o', 'value', partition_device
+                ], capture_output=True, text=True, check=True)
+                
+                label = result.stdout.strip()
+                return label if label else None
+                
+        except subprocess.CalledProcessError:
+            return None
+        except Exception:
+            return None
+        
+        return None
+    
+    def relabel_drive(self, drive: DriveInfo, new_label: str) -> Tuple[bool, str]:
+        """Relabel a drive with a new filesystem label."""
+        if not new_label or len(new_label.strip()) == 0:
+            return False, "Label cannot be empty"
+        
+        if os.geteuid() != 0:
+            return False, "Root privileges required for drive relabeling. Please run with sudo."
+        
+        sanitized_label = re.sub(r'[^a-zA-Z0-9_-]', '_', new_label.strip())
+        if len(sanitized_label) > 11:
+            sanitized_label = sanitized_label[:11]
+        
+        try:
+            if drive.mounted:
+                return False, f"Drive {drive.device} is currently mounted. Please unmount it first."
+            
+            if len(drive.partitions) > 0:
+                partition = drive.partitions[0]
+                partition_device = partition['name']
+                fstype = partition['fstype']
+                
+                if fstype in ['ext2', 'ext3', 'ext4']:
+                    result = subprocess.run([
+                        'e2label', partition_device, sanitized_label
+                    ], capture_output=True, text=True, check=True)
+                    
+                elif fstype in ['fat32', 'vfat', 'exfat']:
+                    upper_label = sanitized_label.upper()
+                    result = subprocess.run([
+                        'fatlabel', partition_device, upper_label
+                    ], capture_output=True, text=True, check=True)
+                    sanitized_label = upper_label
+                    
+                elif fstype == 'ntfs':
+                    result = subprocess.run([
+                        'ntfslabel', partition_device, sanitized_label
+                    ], capture_output=True, text=True, check=True)
+                    
+                else:
+                    return False, f"Unsupported filesystem type: {fstype}. Supported: ext2/3/4, FAT32, exFAT, NTFS"
+                
+                return True, f"Successfully relabeled {partition_device} to '{sanitized_label}'"
+            
+            else:
+                return False, "No partitions found on drive"
+                
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr.strip() if e.stderr else str(e)
+            if "warning" in error_msg.lower() and "permission denied" not in error_msg.lower():
+                return True, f"Successfully relabeled {partition_device} to '{sanitized_label}' (with warnings)"
+            return False, f"Failed to relabel drive: {error_msg}"
+        except Exception as e:
+            return False, f"Unexpected error during relabeling: {str(e)}"
+
+
+class WeirdingUI:
+    """Interactive user interface for Weirding Module setup."""
+    
+    def __init__(self):
+        self.console = Console()
+        self.detector = DriveDetector()
+    
+    def show_welcome(self):
+        """Display welcome message and project overview."""
+        welcome_text = """
+[bold blue]Weirding Module Setup Utility[/bold blue]
+
+Transform your external drive into a portable AI server that adapts to any host system.
+
+[yellow]What is a Weirding Module?[/yellow]
+• A self-contained, bootable AI environment on external storage
+• Automatically detects and optimizes for host hardware (GPU/CPU/Memory)
+• Includes Ollama, HuggingFace Transformers, and optimized ML stack
+• Portable across different computers with hardware-adaptive performance
+
+[red]⚠️  IMPORTANT SAFETY NOTICE ⚠️[/red]
+This process can modify or erase data on your external drive.
+Always backup important data before proceeding.
+        """
+        
+        panel = Panel(
+            welcome_text,
+            title="🚀 Weirding Host Utility",
+            border_style="blue",
+            padding=(1, 2)
+        )
+        
+        self.console.print(panel)
+        self.console.print()
+        
+        return Confirm.ask("Do you want to continue with the setup?", default=True)
+    
+    def scan_and_display_drives(self) -> List[DriveInfo]:
+        """Scan for drives and display them in a formatted table."""
+        self.console.print("\n[blue]Scanning for external drives...[/blue]")
+        
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=self.console,
+            transient=True
+        ) as progress:
+            task = progress.add_task("Detecting storage devices...", total=None)
+            drives = self.detector.scan_drives()
+            progress.update(task, completed=100)
+        
+        external_drives = self.detector.get_external_drives()
+        
+        if not external_drives:
+            self.console.print("[red]No suitable external drives found.[/red]")
+            self.console.print("Please connect an external drive (32GB or larger) and try again.")
+            return []
+        
+        # Create drives table
+        table = Table(title="Available External Drives", show_header=True, header_style="bold magenta")
+        table.add_column("Device", style="cyan", no_wrap=True)
+        table.add_column("Model", style="green")
+        table.add_column("Size", style="yellow")
+        table.add_column("Connection", style="blue")
+        table.add_column("Status", style="red")
+        table.add_column("Suitable", style="bold")
+        
+        for drive in external_drives:
+            meets_req, issues = self.detector.check_drive_requirements(drive)
+            
+            status_parts = []
+            if drive.mounted:
+                status_parts.append("Mounted")
+            if len(drive.partitions) > 0:
+                status_parts.append(f"{len(drive.partitions)} partitions")
+            
+            status = ", ".join(status_parts) if status_parts else "Available"
+            suitable = "[green]✓ Yes[/green]" if meets_req else "[red]✗ No[/red]"
+            
+            table.add_row(
+                drive.device,
+                f"{drive.model} ({drive.vendor})",
+                self.detector.format_size(drive.size),
+                drive.connection_type,
+                status,
+                suitable
+            )
+        
+        self.console.print(table)
+        return external_drives
+
+
+# Create the Typer app
+app = typer.Typer(
+    name="weirding-setup",
+    help="Weirding Module Setup Utility - Create portable AI servers on external drives",
+    add_completion=False
+)
+
+
+@app.command()
+def setup_module():
+    """Set up a new Weirding Module on an external drive."""
+    if os.geteuid() != 0:
+        typer.echo("❌ This command requires root privileges for disk operations.", err=True)
+        typer.echo("Please run with sudo: sudo ./weirding-setup setup-module", err=True)
+        raise typer.Exit(1)
+    
+    ui = WeirdingUI()
+    
+    if not ui.show_welcome():
+        typer.echo("Setup cancelled by user.")
+        return
+    
+    drives = ui.scan_and_display_drives()
+    if not drives:
+        typer.echo("No suitable external drives found.")
+        return
+    
+    typer.echo("\n[INFO] Full Weirding Module setup functionality coming soon!")
+    typer.echo("Currently available: drive detection and relabeling")
+
+
+@app.command()
+def relabel_drive():
+    """Relabel an external drive for easy identification."""
+    if os.geteuid() != 0:
+        typer.echo("❌ This command requires root privileges for drive relabeling.", err=True)
+        typer.echo("Please run with sudo: sudo ./weirding-setup relabel-drive", err=True)
+        raise typer.Exit(1)
+    
+    detector = DriveDetector()
+    console = Console()
+    
+    console.print("[blue]Scanning for external drives...[/blue]")
+    drives = detector.scan_drives()
+    external_drives = detector.get_external_drives()
+    
+    if not external_drives:
+        console.print("[red]No external drives found.[/red]")
+        return
+    
+    suitable_drives = [d for d in external_drives if detector.check_drive_requirements(d)[0]]
+    
+    if not suitable_drives:
+        console.print("[red]No suitable external drives found for relabeling.[/red]")
+        return
+    
+    # Show available drives
+    choices = []
+    for drive in suitable_drives:
+        current_label = detector.get_current_label(drive)
+        label_info = f" (currently: {current_label})" if current_label else " (no label)"
+        choice_text = f"{drive.device} - {drive.model} ({detector.format_size(drive.size)}){label_info}"
+        choices.append({'name': choice_text, 'value': drive})
+    
+    selected_drive = questionary.select(
+        "Select the drive to relabel:",
+        choices=choices
+    ).ask()
+    
+    if not selected_drive:
+        console.print("No drive selected.")
+        return
+    
+    # Get new label
+    new_label = questionary.text(
+        "Enter new label for the drive:",
+        validate=lambda text: len(text.strip()) > 0 and len(text.strip()) <= 11,
+        instruction="(1-11 characters, alphanumeric/underscore/hyphen only)"
+    ).ask()
+    
+    if not new_label:
+        console.print("Relabeling cancelled.")
+        return
+    
+    # Sanitize label
+    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', new_label.strip())
+    if sanitized != new_label.strip():
+        console.print(f"[yellow]Label sanitized to: '{sanitized}'[/yellow]")
+        if not questionary.confirm(f"Use '{sanitized}' as the label?").ask():
+            return
+        new_label = sanitized
+    
+    # Unmount if needed
+    if selected_drive.mounted:
+        console.print("[yellow]Drive is currently mounted. Attempting to unmount...[/yellow]")
+        try:
+            for mount_point in selected_drive.mount_points:
+                subprocess.run(['umount', mount_point], check=True)
+            console.print("[green]Drive unmounted successfully.[/green]")
+        except subprocess.CalledProcessError as e:
+            console.print(f"[red]Failed to unmount drive: {e}[/red]")
+            return
+    
+    # Apply the label
+    console.print(f"[blue]Applying label '{new_label}' to {selected_drive.device}...[/blue]")
+    success, message = detector.relabel_drive(selected_drive, new_label)
+    
+    if success:
+        console.print(f"[green]✅ {message}[/green]")
+    else:
+        console.print(f"[red]❌ {message}[/red]")
+
+
+@app.command()
+def list_drives():
+    """List all detected storage devices and their suitability for Weirding Module setup."""
+    detector = DriveDetector()
+    console = Console()
+    
+    console.print("[blue]Scanning storage devices...[/blue]")
+    drives = detector.scan_drives()
+    
+    if not drives:
+        console.print("[red]No storage devices detected.[/red]")
+        return
+    
+    external_drives = detector.get_external_drives()
+    console.print(f"\nFound {len(drives)} total drives, {len(external_drives)} external drives")
+    
+    for drive in drives:
+        meets_req, issues = detector.check_drive_requirements(drive)
+        current_label = detector.get_current_label(drive)
+        
+        status = "✅ Suitable" if meets_req else "❌ Not suitable"
+        console.print(f"\n{drive.device} - {drive.model} ({detector.format_size(drive.size)}) - {status}")
+        
+        if current_label:
+            console.print(f"  Current Label: {current_label}")
+        
+        if issues:
+            console.print(f"  Issues: {', '.join(issues)}")
+
+
+@app.command()
+def version():
+    """Show version information."""
+    console = Console()
+    console.print("[bold blue]Weirding Module Setup Utility[/bold blue]")
+    console.print("Version: 0.1.0-alpha (Standalone)")
+    console.print("A tool for creating portable, hardware-adaptive AI servers")
+
+
+if __name__ == "__main__":
+    app()

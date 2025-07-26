@@ -11,34 +11,137 @@ A command-line tool to configure external drives as portable AI servers (Weirdin
 
 ## Installation
 
+### Quick Setup with Makefile (Recommended)
+
 ```bash
 # Clone the repository
 git clone https://github.com/your-username/weirding-host.git
 cd weirding-host
 
+# Complete setup (sets permissions, installs dependencies)
+make setup
+
+# Show all available commands
+make help
+```
+
+### Manual Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/your-username/weirding-host.git
+cd weirding-host
+
+# Make scripts executable
+chmod +x weirding-setup install-deps.sh
+
 # Install dependencies
-pip install -r requirements.txt
+./install-deps.sh
 ```
 
 ## Usage
 
-### Setting up a Weirding Module
+### Using Makefile (Recommended)
 
-This command will guide you through selecting a drive and installing the necessary software.
+The easiest way to use the Weirding Host Utility after running `make setup`:
 
 ```bash
-python main.py setup-module
+# List available drives
+make list-drives
+
+# Relabel an external drive (requires sudo)
+make relabel-drive
+
+# Set up a Weirding Module (requires sudo)
+make setup-module
+
+# Show version information
+make version
+
+# Show all available commands
+make help
+
+# Check project status
+make status
+
+# Run basic functionality tests
+make test
 ```
 
-### Configuring a Host System
+### Standalone Script Usage
 
-This command will prepare your current system to work with a pre-existing Weirding Module.
+You can also use the standalone script directly:
 
 ```bash
-python main.py setup-host
+# List available drives
+./weirding-setup list-drives
+
+# Relabel an external drive
+sudo ./weirding-setup relabel-drive
+
+# Set up a Weirding Module
+sudo ./weirding-setup setup-module
+
+# Show version information
+./weirding-setup version
+```
+
+### Development Mode (Virtual Environment)
+
+For development or if you prefer using the virtual environment:
+
+```bash
+# Set up development environment with Makefile
+make dev-setup
+source venv/bin/activate
+
+# OR manually:
+# python3 -m venv venv
+# source venv/bin/activate
+# pip install typer rich questionary
+
+# Using Makefile development commands:
+make dev-list          # List drives
+make dev-relabel       # Relabel drives (requires sudo)
+make dev-setup-mod     # Setup module (requires sudo)
+make dev-version       # Show version
+
+# OR using main.py directly:
+python main.py list-drives
+sudo python main.py relabel-drive
+sudo python main.py setup-module
 ```
 
 ## Development
+
+### Available Makefile Commands
+
+```bash
+# Setup and Installation
+make setup             # Complete project setup
+make dev-setup         # Set up development environment
+make install           # Install dependencies
+make permissions       # Fix script permissions
+
+# Usage Commands
+make list-drives       # List available drives
+make relabel-drive     # Relabel external drive (sudo)
+make setup-module      # Setup Weirding Module (sudo)
+make version           # Show version information
+
+# Development Commands
+make dev-list          # List drives (dev environment)
+make dev-relabel       # Relabel drive (dev environment)
+make dev-setup-mod     # Setup module (dev environment)
+make dev-version       # Show version (dev environment)
+
+# Utility Commands
+make test              # Run basic functionality tests
+make status            # Show project status
+make clean             # Clean up generated files
+make clean-all         # Clean everything including venv
+make help              # Show all available commands
+```
 
 To contribute to development, please see the `.gemini` file for project configuration and guidelines.
 

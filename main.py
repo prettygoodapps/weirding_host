@@ -26,7 +26,10 @@ def setup_module():
     # Check if running as root (required for disk operations)
     if os.geteuid() != 0:
         typer.echo("❌ This command requires root privileges for disk operations.", err=True)
-        typer.echo("Please run with sudo: sudo python main.py setup-module", err=True)
+        typer.echo("Please run with sudo using the virtual environment:", err=True)
+        typer.echo("sudo ./venv/bin/python main.py setup-module", err=True)
+        typer.echo("or activate the virtual environment first:", err=True)
+        typer.echo("source venv/bin/activate && sudo python main.py setup-module", err=True)
         raise typer.Exit(1)
     
     ui = WeirdingUI()
@@ -58,8 +61,19 @@ def setup_module():
             typer.echo("No setup mode selected. Setup cancelled.")
             raise typer.Exit(0)
         
+        # Module name configuration
+        module_name = ui.configure_module_name(selected_drive)
+        if module_name is None:
+            typer.echo("Module name configuration cancelled. Setup cancelled.")
+            raise typer.Exit(0)
+        
+        # Apply drive label if requested
+        if module_name and not ui.apply_drive_label(selected_drive, module_name):
+            typer.echo("Failed to apply drive label. Setup cancelled.")
+            raise typer.Exit(1)
+        
         # Final confirmation
-        if not ui.show_setup_summary(selected_drive, mode, analysis):
+        if not ui.show_setup_summary(selected_drive, mode, analysis, module_name):
             typer.echo("Setup cancelled by user.")
             raise typer.Exit(0)
         
@@ -129,6 +143,58 @@ def list_drives():
         
         if analysis['safety_warnings']:
             ui.console.print(f"  Warnings: {', '.join(analysis['safety_warnings'])}")
+
+@app.command()
+def relabel_drive():
+    """Relabel an external drive for easy identification."""
+    # Check if running as root (required for drive relabeling)
+    if os.geteuid() != 0:
+        typer.echo("❌ This command requires root privileges for drive relabeling.", err=True)
+        typer.echo("Please run with sudo using the virtual environment:", err=True)
+        typer.echo("sudo ./venv/bin/python main.py relabel-drive", err=True)
+        typer.echo("or activate the virtual environment first:", err=True)
+        typer.echo("source venv/bin/activate && sudo python main.py relabel-drive", err=True)
+        raise typer.Exit(1)
+    
+    detector = DriveDetector()
+    ui = WeirdingUI()
+    
+    ui.console.print("[blue]Scanning for external drives...[/blue]")
+    drives = detector.scan_drives()
+    external_drives = detector.get_external_drives()
+    
+    if not external_drives:
+        ui.console.print("[red]No external drives found.[/red]")
+        return
+    
+    # Show available drives
+    suitable_drives = [d for d in external_drives if detector.check_drive_requirements(d)[0]]
+    
+    if not suitable_drives:
+        ui.console.print("[red]No suitable external drives found for relabeling.[/red]")
+        return
+    
+    # Let user select drive
+    selected_drive = ui.select_drive(external_drives)
+    if not selected_drive:
+        ui.console.print("No drive selected.")
+        return
+    
+    # Show current label
+    current_label = detector.get_current_label(selected_drive)
+    ui.console.print(f"\n[blue]Current label:[/blue] {current_label if current_label else 'No label set'}")
+    
+    # Get new label
+    module_name = ui.configure_module_name(selected_drive)
+    if module_name is None:
+        ui.console.print("Relabeling cancelled.")
+        return
+    
+    # Apply the label
+    if ui.apply_drive_label(selected_drive, module_name):
+        ui.show_success("Drive Relabeled", f"Successfully relabeled drive to '{module_name}'")
+    else:
+        ui.console.print("[red]Failed to relabel drive.[/red]")
 
 @app.command()
 def version():
