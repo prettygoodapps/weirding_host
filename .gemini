@@ -1,0 +1,38 @@
+# Gemini Project Configuration
+
+## Project Information
+- **Name**: Weirding Host Utility
+- **Description**: A command-line tool to configure external drives as portable AI servers (Weirding Modules) and to prepare host systems to use them.
+- **Version**: 0.1.0
+
+## Development Environment
+- **Language**: Python
+- **Key Libraries**:
+  - `typer`: For creating the command-line interface.
+  - `rich`: For beautiful and informative terminal output.
+  - `subprocess`: For running external shell commands (e.g., `lsblk`, `parted`).
+  - `questionary`: For interactive prompts and user input.
+
+## File Structure
+- `main.py`: The main entry point for the CLI application.
+- `config.py`: Handles configuration management (e.g., loading/saving settings).
+- `modules/`: Contains the core logic for different subcommands.
+  - `device_setup.py`: Logic for finding, partitioning, and formatting devices.
+  - `os_installer.py`: Logic for installing the base OS onto the device.
+  - `stack_installer.py`: Logic for installing the AI stack (Ollama, etc.).
+  - `host_setup.py`: Logic for configuring the host system.
+- `utils.py`: Shared utility functions (e.g., command execution, error handling).
+- `tests/`: Unit and integration tests.
+  - `test_device_setup.py`
+  - `test_host_setup.py`
+
+## Commands (Subcommands)
+- `weirding setup-module`: Guides the user through setting up a new Weirding Module.
+- `weirding setup-host`: Prepares the current system to work with a Weirding Module.
+- `weirding list-devices`: Lists available storage devices suitable for setup.
+- `weirding manage-models`: (Future) Interface for downloading and managing AI models.
+
+## Formatting and Linting
+- **Linter**: `ruff`
+- **Formatter**: `black`
+- **Configuration**: See `pyproject.toml` for detailed settings.
