@@ -124,6 +124,18 @@ test: permissions ## Run basic functionality tests
 	@test -x $(STANDALONE_SCRIPT) && echo "✅ Standalone script is executable" || echo "❌ Standalone script not executable"
 	@test -x $(INSTALL_SCRIPT) && echo "✅ Install script is executable" || echo "❌ Install script not executable"
 
+test-unit: $(VENV) ## Run unit tests
+	@echo "Running unit tests..."
+	@$(PYTHON_VENV) -m pytest tests/test_device_setup.py -v || $(PYTHON_VENV) tests/test_device_setup.py
+
+test-integration: $(VENV) ## Run integration tests
+	@echo "Running integration tests..."
+	@$(PYTHON_VENV) -m pytest tests/test_cli_integration.py -v || $(PYTHON_VENV) tests/test_cli_integration.py
+
+test-all: $(VENV) ## Run comprehensive test suite
+	@echo "Running comprehensive test suite..."
+	@$(PYTHON_VENV) tests/run_tests.py
+
 clean: ## Clean up generated files and caches
 	@echo "Cleaning up..."
 	@rm -rf __pycache__/

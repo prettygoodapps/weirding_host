@@ -77,19 +77,112 @@ def setup_module():
             typer.echo("Setup cancelled by user.")
             raise typer.Exit(0)
         
-        # TODO: Implement actual setup process
-        ui.console.print("\n[yellow]⚠️  Setup process implementation in progress...[/yellow]")
-        ui.console.print("The following steps would be executed:")
-        ui.console.print("1. Unmount drive and backup partition table")
-        ui.console.print("2. Create new partition layout")
-        ui.console.print("3. Install bootloader (GRUB)")
-        ui.console.print("4. Install minimal Debian OS")
-        ui.console.print("5. Install AI stack (Ollama, HuggingFace, PyTorch)")
-        ui.console.print("6. Configure hardware detection")
-        ui.console.print("7. Setup model storage and initial downloads")
-        ui.console.print("8. Verify installation")
+        # Import the new modules
+        from modules.partitioner import DrivePartitioner
+        from modules.bootloader import BootloaderInstaller
+        from modules.os_installer import OSInstaller
+        from modules.stack_installer import AIStackInstaller
         
-        ui.show_completion_summary(selected_drive, mode)
+        # Initialize installers
+        partitioner = DrivePartitioner()
+        bootloader_installer = BootloaderInstaller()
+        os_installer = OSInstaller()
+        ai_installer = AIStackInstaller()
+        
+        # Create partition plan
+        ui.console.print("\n[blue]Creating partition plan...[/blue]")
+        partition_plan = partitioner.create_partition_plan(selected_drive, mode, module_name)
+        
+        # Execute the setup process
+        try:
+            # Step 1: Apply partitioning
+            with ui.show_progress_screen("Partitioning Drive") as progress:
+                task = progress.add_task("Applying partition plan...", total=100)
+                
+                success = partitioner.apply_partition_plan(
+                    partition_plan,
+                    lambda msg: progress.update(task, description=msg)
+                )
+                progress.update(task, completed=100)
+                
+                if not success:
+                    ui.show_error("Partitioning Failed", "Failed to apply partition plan")
+                    raise typer.Exit(1)
+            
+            ui.console.print("[green]✅ Partitioning completed successfully[/green]")
+            
+            # Step 2: Install bootloader
+            with ui.show_progress_screen("Installing Bootloader") as progress:
+                task = progress.add_task("Installing GRUB bootloader...", total=100)
+                
+                success = bootloader_installer.install_bootloader(
+                    partition_plan,
+                    lambda msg: progress.update(task, description=msg)
+                )
+                progress.update(task, completed=100)
+                
+                if not success:
+                    ui.show_error("Bootloader Installation Failed", "Failed to install GRUB bootloader")
+                    raise typer.Exit(1)
+            
+            ui.console.print("[green]✅ Bootloader installed successfully[/green]")
+            
+            # Step 3: Install OS
+            with ui.show_progress_screen("Installing Operating System") as progress:
+                task = progress.add_task("Installing Debian base system...", total=100)
+                
+                success = os_installer.install_os(
+                    partition_plan,
+                    lambda msg: progress.update(task, description=msg)
+                )
+                progress.update(task, completed=100)
+                
+                if not success:
+                    ui.show_error("OS Installation Failed", "Failed to install operating system")
+                    raise typer.Exit(1)
+            
+            ui.console.print("[green]✅ Operating system installed successfully[/green]")
+            
+            # Step 4: Install AI stack
+            with ui.show_progress_screen("Installing AI Stack") as progress:
+                task = progress.add_task("Installing AI software stack...", total=100)
+                
+                success = ai_installer.install_ai_stack(
+                    partition_plan,
+                    lambda msg: progress.update(task, description=msg)
+                )
+                progress.update(task, completed=100)
+                
+                if not success:
+                    ui.show_error("AI Stack Installation Failed", "Failed to install AI software stack")
+                    raise typer.Exit(1)
+            
+            ui.console.print("[green]✅ AI stack installed successfully[/green]")
+            
+            # Step 5: Verify installation
+            ui.console.print("\n[blue]Verifying installation...[/blue]")
+            
+            # Verify bootloader
+            if bootloader_installer.verify_bootloader_installation(partition_plan):
+                ui.console.print("[green]✅ Bootloader verification passed[/green]")
+            else:
+                ui.console.print("[yellow]⚠️  Bootloader verification had warnings[/yellow]")
+            
+            ui.console.print("[green]🎉 Weirding Module setup completed successfully![/green]")
+            ui.show_completion_summary(selected_drive, mode)
+            
+        except Exception as e:
+            ui.show_error("Setup Failed", f"An error occurred during setup: {str(e)}")
+            
+            # Attempt recovery if backup exists
+            if hasattr(partition_plan, 'backup_file') and partition_plan.backup_file:
+                ui.console.print("\n[yellow]Attempting to restore from backup...[/yellow]")
+                if partitioner.restore_partition_table(selected_drive, partition_plan.backup_file):
+                    ui.console.print("[green]Partition table restored from backup[/green]")
+                else:
+                    ui.console.print("[red]Failed to restore from backup[/red]")
+            
+            raise typer.Exit(1)
         
     except KeyboardInterrupt:
         ui.console.print("\n[yellow]Setup interrupted by user.[/yellow]")
