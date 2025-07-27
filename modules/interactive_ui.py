@@ -20,6 +20,7 @@ import time
 import subprocess
 
 from device_setup import DriveInfo, DriveDetector
+from base_images import BaseImageCatalog, BaseImage
 
 
 class WeirdingUI:
@@ -28,6 +29,7 @@ class WeirdingUI:
     def __init__(self):
         self.console = Console()
         self.detector = DriveDetector()
+        self.image_catalog = BaseImageCatalog()
         
     def show_welcome(self):
         """Display welcome message and project overview."""
@@ -274,6 +276,147 @@ Always backup important data before proceeding.
         
         return selected_mode
     
+    def select_base_image(self, drive: DriveInfo, mode: str) -> Optional[BaseImage]:
+        """Allow user to select a base operating system image."""
+        self.console.print("\n[bold blue]Base Image Selection[/bold blue]")
+        
+        # Show base image catalog
+        images = self.image_catalog.get_all_images()
+        
+        # Create image selection table
+        table = Table(title="Available Base Operating System Images", show_header=True, header_style="bold magenta")
+        table.add_column("Image", style="cyan", no_wrap=True)
+        table.add_column("Version", style="green")
+        table.add_column("Size", style="yellow")
+        table.add_column("Status", style="blue")
+        table.add_column("AI/ML", style="red")
+        table.add_column("Use Cases", style="white")
+        
+        for image in images:
+            # Check if image is cached
+            cached_status = "✅ Cached" if self.image_catalog.is_image_cached(image) else "📥 Download"
+            ai_status = "🤖 Optimized" if image.ai_optimized else "○ Standard"
+            use_cases = ", ".join(image.recommended_for[:2])  # Show first 2 use cases
+            
+            table.add_row(
+                image.name,
+                f"v{image.version}",
+                self.image_catalog.format_size(image.size_mb),
+                cached_status,
+                ai_status,
+                use_cases
+            )
+        
+        self.console.print(table)
+        
+        # Show detailed information panel
+        info_text = """
+[yellow]Image Selection Guide:[/yellow]
+
+[green]🚀 Recommended for AI/ML:[/green]
+• Ubuntu 24.04 AI-Optimized - Pre-configured with AI frameworks
+• Ubuntu 22.04 Server - Modern hardware support, great for GPU workloads
+• Fedora 39 - Latest AI/ML tools and frameworks
+
+[blue]💾 Lightweight Options:[/blue]
+• Alpine Linux 3.19 - Ultra-minimal (180MB) for resource-constrained setups
+• Debian 12 Minimal - Lightweight and stable (380MB)
+
+[red]⚡ Performance Notes:[/red]
+• Cached images install instantly
+• Download time varies by connection speed
+• Larger images include more pre-installed software
+        """
+        
+        panel = Panel(
+            info_text.strip(),
+            title="📋 Base Image Information",
+            border_style="cyan",
+            padding=(1, 2)
+        )
+        
+        self.console.print(panel)
+        
+        # Create selection choices
+        choices = []
+        for image in images:
+            cached_indicator = "✅" if self.image_catalog.is_image_cached(image) else "📥"
+            ai_indicator = "🤖" if image.ai_optimized else ""
+            
+            choice_text = f"{cached_indicator} {image.name} v{image.version} - {self.image_catalog.format_size(image.size_mb)} {ai_indicator}"
+            choices.append({
+                'name': choice_text,
+                'value': image
+            })
+        
+        # Add option to show detailed information
+        choices.append({
+            'name': "ℹ️  Show detailed image information",
+            'value': 'show_details'
+        })
+        
+        while True:
+            selected = questionary.select(
+                "Choose a base operating system image:",
+                choices=choices,
+                style=questionary.Style([
+                    ('question', 'bold'),
+                    ('answer', 'fg:#ff9d00 bold'),
+                    ('pointer', 'fg:#ff9d00 bold'),
+                    ('highlighted', 'fg:#ff9d00 bold'),
+                ])
+            ).ask()
+            
+            if not selected:
+                return None
+            
+            if selected == 'show_details':
+                self._show_detailed_image_info(images)
+                continue
+            
+            # Confirm selection
+            self.console.print(f"\n[blue]Selected:[/blue] {selected.name} v{selected.version}")
+            self.console.print(f"[blue]Description:[/blue] {selected.description}")
+            self.console.print(f"[blue]Size:[/blue] {self.image_catalog.format_size(selected.size_mb)}")
+            
+            if not self.image_catalog.is_image_cached(selected):
+                self.console.print(f"[yellow]Note:[/yellow] This image will be downloaded ({self.image_catalog.format_size(selected.size_mb)})")
+            
+            from rich.prompt import Confirm
+            if Confirm.ask(f"Use {selected.name} as the base image?", default=True):
+                return selected
+    
+    def _show_detailed_image_info(self, images: List[BaseImage]):
+        """Show detailed information about all available images."""
+        for image in images:
+            cached = "✅ Available locally" if self.image_catalog.is_image_cached(image) else "📥 Requires download"
+            
+            detail_text = f"""
+[bold]{image.name} v{image.version}[/bold]
+
+[blue]Description:[/blue] {image.description}
+[blue]Size:[/blue] {self.image_catalog.format_size(image.size_mb)}
+[blue]Architecture:[/blue] {image.architecture}
+[blue]Status:[/blue] {cached}
+
+[green]Features:[/green]
+• AI/ML Optimized: {'Yes' if image.ai_optimized else 'No'}
+• Container Ready: {'Yes' if image.container_ready else 'No'}
+• GPU Support: {', '.join(image.gpu_support)}
+
+[yellow]Recommended for:[/yellow] {', '.join(image.recommended_for)}
+            """
+            
+            panel = Panel(
+                detail_text.strip(),
+                title=f"🖥️  {image.name}",
+                border_style="blue",
+                padding=(1, 2)
+            )
+            
+            self.console.print(panel)
+            self.console.print()
+    
     def configure_module_name(self, drive: DriveInfo) -> Optional[str]:
         """
         Allow user to configure the Weirding Module name/label.
@@ -439,7 +582,7 @@ Always backup important data before proceeding.
                 self.show_error("Labeling Failed", message)
             return False
     
-    def show_setup_summary(self, drive: DriveInfo, mode: str, analysis: Dict, module_name: str = None) -> bool:
+    def show_setup_summary(self, drive: DriveInfo, mode: str, analysis: Dict, module_name: str = None, base_image = None) -> bool:
         """Show final setup summary and get confirmation."""
         
         if mode == 'full_wipe':
@@ -477,6 +620,17 @@ Always backup important data before proceeding.
 • Hardware-adaptive AI stack installation
             """
         
+        # Base image information
+        base_image_info = ""
+        if base_image:
+            cached_status = "locally cached" if self.image_catalog.is_image_cached(base_image) else f"will download {self.image_catalog.format_size(base_image.size_mb)}"
+            ai_info = "🤖 AI-optimized" if base_image.ai_optimized else "Standard"
+            
+            base_image_info = f"""
+[bold]Base Image:[/bold] {base_image.name} v{base_image.version} ({ai_info})
+[bold]Image Size:[/bold] {self.image_catalog.format_size(base_image.size_mb)} ({cached_status})
+[bold]Description:[/bold] {base_image.description}"""
+        
         summary_text = f"""
 [bold blue]Setup Summary[/bold blue]
 
@@ -484,7 +638,7 @@ Always backup important data before proceeding.
 [bold]Model:[/bold] {drive.model} ({drive.vendor})
 [bold]Size:[/bold] {self.detector.format_size(drive.size)}
 [bold]Mode:[/bold] {mode.replace('_', ' ').title()}
-[bold]Module Name:[/bold] {module_name if module_name else 'No custom name set'}
+[bold]Module Name:[/bold] {module_name if module_name else 'No custom name set'}{base_image_info}
 
 {impact_text}
 
@@ -493,13 +647,13 @@ Always backup important data before proceeding.
 2. Backup partition table
 3. Create/modify partitions
 4. Install bootloader
-5. Install minimal Debian OS
+5. {"Download and install base OS image" if base_image else "Install minimal Debian OS"}
 6. Install AI stack (Ollama, HuggingFace, PyTorch)
 7. Configure hardware detection
 8. Download initial AI models
 9. Verify installation
 
-[bold]Estimated Time:[/bold] 30-60 minutes depending on internet speed
+[bold]Estimated Time:[/bold] {"15-30 minutes" if base_image and self.image_catalog.is_image_cached(base_image) else "30-60 minutes"} depending on internet speed
         """
         
         panel = Panel(

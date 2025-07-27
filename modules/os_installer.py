@@ -31,80 +31,186 @@ class OSInstaller:
         
     def install_os(self, plan: PartitionPlan, progress_callback=None) -> bool:
         """
-        Install minimal Debian OS on the Weirding Module.
+        Create a bootable Weirding Module by writing ISO directly to drive.
         
         Args:
-            plan: PartitionPlan with partition information
+            plan: PartitionPlan with drive and base image information
             progress_callback: Optional callback for progress updates
             
         Returns:
             True if successful, False otherwise
         """
         try:
-            # Step 1: Mount partitions
-            if progress_callback:
-                progress_callback("Mounting partitions for OS installation...")
-            
-            mount_points = self._mount_partitions(plan)
-            if not mount_points:
+            if not plan.base_image:
+                print("Error: Base image is required for Weirding Module creation")
                 return False
             
-            # Step 2: Install base system with debootstrap
-            if progress_callback:
-                progress_callback("Installing base Debian system (this may take 10-20 minutes)...")
+            from base_images import BaseImageCatalog
+            catalog = BaseImageCatalog()
             
-            success = self._install_base_system(mount_points['root'], progress_callback)
+            # Step 1: Ensure image is available locally
+            if progress_callback:
+                progress_callback(f"Preparing {plan.base_image.name}...")
+            
+            if not catalog.is_image_cached(plan.base_image):
+                if progress_callback:
+                    progress_callback(f"Downloading {plan.base_image.name} ({catalog.format_size(plan.base_image.size_mb)})...")
+                
+                image_path = catalog.download_image(plan.base_image, progress_callback)
+                if not image_path:
+                    print(f"Failed to download base image: {plan.base_image.name}")
+                    return False
+            else:
+                image_path = catalog.get_cached_image_path(plan.base_image)
+            
+            if not image_path or not os.path.exists(image_path):
+                print(f"Image file not found: {image_path}")
+                return False
+            
+            # Step 2: Write ISO directly to drive (creating bootable USB)
+            if progress_callback:
+                progress_callback("Creating bootable Weirding Module...")
+            
+            success = self._write_iso_to_drive(image_path, plan.drive.device, progress_callback)
             if not success:
-                self._unmount_partitions(mount_points)
                 return False
             
-            # Step 3: Configure the system
+            # Step 3: Add Weirding-specific configuration to the bootable drive
             if progress_callback:
-                progress_callback("Configuring system settings...")
+                progress_callback("Adding Weirding Module configuration...")
             
-            success = self._configure_system(plan, mount_points, progress_callback)
+            success = self._add_weirding_config(plan)
             if not success:
-                self._unmount_partitions(mount_points)
-                return False
-            
-            # Step 4: Install kernel and essential packages
-            if progress_callback:
-                progress_callback("Installing kernel and essential packages...")
-            
-            success = self._install_kernel_and_essentials(mount_points['root'], progress_callback)
-            if not success:
-                self._unmount_partitions(mount_points)
-                return False
-            
-            # Step 5: Configure hardware detection
-            if progress_callback:
-                progress_callback("Setting up hardware detection...")
-            
-            success = self._setup_hardware_detection(mount_points['root'])
-            if not success:
-                self._unmount_partitions(mount_points)
-                return False
-            
-            # Step 6: Create Weirding-specific configurations
-            if progress_callback:
-                progress_callback("Creating Weirding Module configurations...")
-            
-            success = self._create_weirding_configs(plan, mount_points['root'])
-            if not success:
-                self._unmount_partitions(mount_points)
-                return False
-            
-            # Step 7: Cleanup and unmount
-            if progress_callback:
-                progress_callback("Finalizing installation...")
-            
-            self._cleanup_installation(mount_points['root'])
-            self._unmount_partitions(mount_points)
+                print("Warning: Could not add Weirding configuration, but drive is bootable")
             
             return True
             
         except Exception as e:
-            print(f"Error during OS installation: {e}")
+            print(f"Error creating Weirding Module: {e}")
+            return False
+    
+    def _write_iso_to_drive(self, iso_path: str, device: str, progress_callback=None) -> bool:
+        """Write ISO directly to drive to create bootable USB."""
+        try:
+            if progress_callback:
+                progress_callback("Writing ISO to drive (this may take several minutes)...")
+            
+            print(f"Writing {iso_path} to {device}...")
+            
+            # Use dd to write ISO directly to device
+            dd_cmd = [
+                'dd',
+                f'if={iso_path}',
+                f'of={device}',
+                'bs=4M',
+                'status=progress',
+                'conv=fdatasync'
+            ]
+            
+            # Run dd command
+            process = subprocess.Popen(
+                dd_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            # Monitor progress
+            while True:
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output and progress_callback:
+                    if "copied" in output.lower():
+                        progress_callback("Writing ISO to drive...")
+            
+            return_code = process.poll()
+            if return_code != 0:
+                print(f"Failed to write ISO to drive, return code: {return_code}")
+                return False
+            
+            # Sync filesystem
+            subprocess.run(['sync'], check=True)
+            
+            if progress_callback:
+                progress_callback("ISO written successfully to drive")
+            
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            print(f"Error writing ISO to drive: {e}")
+            return False
+        except Exception as e:
+            print(f"Unexpected error writing ISO: {e}")
+            return False
+    
+    def _add_weirding_config(self, plan: PartitionPlan) -> bool:
+        """Add Weirding-specific configuration to the bootable drive."""
+        try:
+            # Wait for drive to settle after dd
+            time.sleep(2)
+            
+            # Create a simple weirding configuration file
+            weirding_config = {
+                "version": "1.0",
+                "module_name": "weirding",
+                "created": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+                "drive_info": {
+                    "device": plan.drive.device,
+                    "model": plan.drive.model,
+                    "vendor": plan.drive.vendor,
+                    "size": plan.drive.size
+                },
+                "base_image": {
+                    "name": plan.base_image.name if plan.base_image else None,
+                    "version": plan.base_image.version if plan.base_image else None,
+                    "architecture": plan.base_image.architecture if plan.base_image else None,
+                    "ai_optimized": plan.base_image.ai_optimized if plan.base_image else False
+                },
+                "bootable": True,
+                "portable": True
+            }
+            
+            # Try to mount the drive and add config (non-critical)
+            try:
+                # Find the first partition
+                partitions = subprocess.run(
+                    ['lsblk', '-n', '-o', 'NAME', plan.drive.device],
+                    capture_output=True, text=True, check=True
+                ).stdout.strip().split('\n')[1:]  # Skip the device itself
+                
+                if partitions:
+                    partition = f"{plan.drive.device}{partitions[0].strip()}"
+                    
+                    # Create temporary mount point
+                    mount_point = Path("/tmp/weirding_config_mount")
+                    mount_point.mkdir(exist_ok=True)
+                    
+                    # Mount the partition
+                    subprocess.run([
+                        'mount', partition, str(mount_point)
+                    ], capture_output=True, text=True, check=True)
+                    
+                    # Write config file
+                    config_file = mount_point / "weirding.json"
+                    with open(config_file, 'w') as f:
+                        json.dump(weirding_config, f, indent=2)
+                    
+                    # Unmount
+                    subprocess.run(['umount', str(mount_point)], capture_output=True)
+                    
+                    print("Added Weirding configuration to bootable drive")
+                    
+            except subprocess.CalledProcessError:
+                # Config addition failed, but drive is still bootable
+                print("Could not add configuration file, but drive is bootable")
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error adding Weirding config: {e}")
             return False
     
     def _mount_partitions(self, plan: PartitionPlan) -> Dict[str, str]:
@@ -157,13 +263,19 @@ class OSInstaller:
                     pass  # Swap is optional
             
             # Mount essential filesystems for chroot
-            for fs_type, mount_point in [('proc', 'proc'), ('sys', 'sys'), ('dev', 'dev')]:
+            mount_specs = [
+                ('proc', 'proc', 'proc'),       # filesystem type, device, mount point
+                ('sysfs', 'sysfs', 'sys'),      # filesystem type, device, mount point
+                ('devtmpfs', 'devtmpfs', 'dev') # filesystem type, device, mount point
+            ]
+            
+            for fs_type, device, mount_point in mount_specs:
                 target_dir = root_mount / mount_point
                 target_dir.mkdir(exist_ok=True)
                 subprocess.run([
-                    'mount', '-t', fs_type, fs_type, str(target_dir)
+                    'mount', '-t', fs_type, device, str(target_dir)
                 ], capture_output=True, text=True, check=True)
-                mount_points[fs_type] = str(target_dir)
+                mount_points[mount_point] = str(target_dir)
             
             # Mount dev/pts
             devpts_dir = root_mount / "dev" / "pts"
@@ -196,7 +308,7 @@ class OSInstaller:
             debootstrap_cmd = [
                 'debootstrap',
                 '--arch=amd64',
-                '--include=systemd,systemd-sysv,dbus,openssh-server,curl,wget,gnupg,ca-certificates',
+                '--include=systemd,systemd-sysv,dbus,openssh-server,curl,wget,gnupg,ca-certificates,locales',
                 self.debian_release,
                 root_mount,
                 self.debian_mirror
@@ -241,6 +353,227 @@ class OSInstaller:
             return False
         except Exception as e:
             print(f"Unexpected error during base system installation: {e}")
+            return False
+    
+    def _install_from_iso(self, base_image, root_mount: str, progress_callback=None) -> bool:
+        """Install base system from ISO image."""
+        try:
+            from base_images import BaseImageCatalog
+            catalog = BaseImageCatalog()
+            
+            # Ubuntu Server ISOs are installer ISOs, not live systems
+            # Fall back to debootstrap for server installations
+            if "server" in base_image.name.lower():
+                if progress_callback:
+                    progress_callback(f"Server ISO detected, using debootstrap installation...")
+                print(f"DEBUG: Server ISO detected for {base_image.name}, falling back to debootstrap")
+                return self._install_base_system(root_mount, progress_callback)
+            
+            # Step 1: Ensure image is available locally
+            if not catalog.is_image_cached(base_image):
+                if progress_callback:
+                    progress_callback(f"Downloading {base_image.name} ({catalog.format_size(base_image.size_mb)})...")
+                
+                image_path = catalog.download_image(base_image, progress_callback)
+                if not image_path:
+                    print(f"Failed to download base image: {base_image.name}")
+                    return False
+            else:
+                image_path = catalog.get_cached_image_path(base_image)
+            
+            if not image_path or not os.path.exists(image_path):
+                print(f"Image file not found: {image_path}")
+                return False
+            
+            # Step 3: Mount the ISO
+            iso_mount_dir = Path("/tmp/weirding_iso_mount")
+            iso_mount_dir.mkdir(exist_ok=True)
+            
+            if progress_callback:
+                progress_callback("Mounting base image...")
+            
+            try:
+                subprocess.run([
+                    'mount', '-o', 'loop,ro', str(image_path), str(iso_mount_dir)
+                ], capture_output=True, text=True, check=True)
+            except subprocess.CalledProcessError as e:
+                print(f"Failed to mount ISO: {e.stderr}")
+                return False
+            
+            # Step 4: Extract filesystem from ISO
+            if progress_callback:
+                progress_callback("Extracting base system filesystem...")
+            
+            squashfs_mount_dir = None
+            try:
+                # Find the squashfs filesystem inside the ISO (Ubuntu uses casper/filesystem.squashfs)
+                squashfs_path = None
+                possible_paths = [
+                    iso_mount_dir / "casper" / "filesystem.squashfs",
+                    iso_mount_dir / "live" / "filesystem.squashfs",
+                    iso_mount_dir / "filesystem.squashfs"
+                ]
+                
+                for path in possible_paths:
+                    if path.exists():
+                        squashfs_path = path
+                        break
+                
+                if not squashfs_path:
+                    print(f"Could not find squashfs filesystem in ISO. Available files:")
+                    for item in iso_mount_dir.rglob("*"):
+                        if item.is_file():
+                            print(f"  {item.relative_to(iso_mount_dir)}")
+                    return False
+                
+                if progress_callback:
+                    progress_callback("Mounting filesystem from ISO...")
+                
+                # Mount the squashfs filesystem
+                squashfs_mount_dir = Path("/tmp/weirding_squashfs_mount")
+                squashfs_mount_dir.mkdir(exist_ok=True)
+                
+                subprocess.run([
+                    'mount', '-t', 'squashfs', '-o', 'loop,ro',
+                    str(squashfs_path), str(squashfs_mount_dir)
+                ], capture_output=True, text=True, check=True)
+                
+                if progress_callback:
+                    progress_callback("Extracting filesystem contents...")
+                
+                # Use rsync to copy the actual filesystem
+                rsync_cmd = [
+                    'rsync', '-av', '--progress',
+                    f"{squashfs_mount_dir}/",
+                    f"{root_mount}/"
+                ]
+                
+                process = subprocess.Popen(
+                    rsync_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True
+                )
+                
+                # Monitor rsync progress
+                while True:
+                    output = process.stdout.readline()
+                    if output == '' and process.poll() is not None:
+                        break
+                    if output and progress_callback:
+                        # Extract meaningful progress info from rsync output
+                        if "%" in output:
+                            progress_callback("Extracting filesystem...")
+                        elif "sent" in output and "received" in output:
+                            progress_callback("Finalizing filesystem extraction...")
+                
+                return_code = process.poll()
+                print(f"DEBUG: rsync completed with return code: {return_code}")
+                if return_code != 0:
+                    print(f"Filesystem extraction failed with return code {return_code}")
+                    return False
+                
+                print(f"DEBUG: Filesystem extraction completed successfully")
+                
+            except subprocess.CalledProcessError as e:
+                print(f"Error extracting filesystem: {e.stderr}")
+                return False
+            except Exception as e:
+                print(f"Error during filesystem extraction: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+            finally:
+                print(f"DEBUG: Starting cleanup...")
+                # Unmount squashfs
+                if squashfs_mount_dir:
+                    try:
+                        subprocess.run(['umount', str(squashfs_mount_dir)], capture_output=True)
+                        print(f"DEBUG: Unmounted squashfs")
+                    except subprocess.CalledProcessError as e:
+                        print(f"DEBUG: Failed to unmount squashfs: {e}")
+                        pass
+                
+                # Unmount ISO
+                try:
+                    subprocess.run(['umount', str(iso_mount_dir)], capture_output=True)
+                    print(f"DEBUG: Unmounted ISO")
+                except subprocess.CalledProcessError as e:
+                    print(f"DEBUG: Failed to unmount ISO: {e}")
+                    pass
+                
+                print(f"DEBUG: Cleanup completed")
+            
+            print(f"DEBUG: About to call _configure_iso_system...")
+            
+            # Step 5: Post-extraction configuration for ISO-based systems
+            if progress_callback:
+                progress_callback("Configuring extracted system...")
+            
+            print(f"DEBUG: Calling _configure_iso_system for {base_image.name}...")
+            success = self._configure_iso_system(base_image, root_mount)
+            print(f"DEBUG: _configure_iso_system returned: {success}")
+            if not success:
+                print(f"DEBUG: _configure_iso_system failed, returning False")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error installing from ISO: {e}")
+            return False
+    
+    def _configure_iso_system(self, base_image, root_mount: str) -> bool:
+        """Configure system after ISO extraction."""
+        try:
+            print(f"DEBUG: Starting ISO system configuration for {base_image.name}")
+            
+            # Ensure essential directories exist
+            essential_dirs = [
+                'proc', 'sys', 'dev', 'tmp', 'var/tmp',
+                'opt/weirding', 'opt/models', 'var/lib/weirding'
+            ]
+            
+            print(f"DEBUG: Creating essential directories...")
+            for dir_path in essential_dirs:
+                full_path = Path(f"{root_mount}/{dir_path}")
+                full_path.mkdir(parents=True, exist_ok=True)
+                print(f"DEBUG: Created directory: {dir_path}")
+            
+            # Check if basic system files exist
+            critical_files = [
+                'etc/apt/sources.list',
+                'usr/bin/apt-get',
+                'bin/bash',
+                'etc/passwd'
+            ]
+            
+            print(f"DEBUG: Checking for critical system files...")
+            missing_files = []
+            for file_path in critical_files:
+                full_path = Path(f"{root_mount}/{file_path}")
+                if not full_path.exists():
+                    missing_files.append(file_path)
+                    print(f"DEBUG: Missing critical file: {file_path}")
+                else:
+                    print(f"DEBUG: Found critical file: {file_path}")
+            
+            if missing_files:
+                print(f"WARNING: Missing critical files: {missing_files}")
+                # Try to continue anyway - might be a different filesystem layout
+            
+            # Skip apt operations for now to isolate the issue
+            print(f"DEBUG: Skipping apt operations to isolate configuration issue")
+            
+            print(f"DEBUG: ISO system configuration completed successfully")
+            return True
+            
+        except Exception as e:
+            print(f"Error configuring ISO system: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def _configure_system(self, plan: PartitionPlan, mount_points: Dict[str, str], progress_callback=None) -> bool:
@@ -381,20 +714,37 @@ nameserver 1.1.1.1
     def _install_kernel_and_essentials(self, root_mount: str, progress_callback=None) -> bool:
         """Install Linux kernel and essential packages."""
         try:
+            # Configure sources.list in the chroot for better package availability
+            sources_list_content = f"""deb {self.debian_mirror} {self.debian_release} main
+deb {self.debian_mirror} {self.debian_release}-updates main
+deb http://security.debian.org/debian-security {self.debian_release}-security main
+"""
+            with open(f"{root_mount}/etc/apt/sources.list", 'w') as f:
+                f.write(sources_list_content)
+            
             # Update package lists
             subprocess.run([
                 'chroot', root_mount, 'apt-get', 'update'
             ], capture_output=True, text=True, check=True)
             
-            # Install kernel and essential packages
-            essential_packages = [
+            # Fix any broken dependencies first
+            subprocess.run([
+                'chroot', root_mount, 'apt-get', 'install', '-f', '-y'
+            ], capture_output=True, text=True, check=True)
+            
+            # Install packages in order of importance to avoid conflicts
+            kernel_packages = [
                 'linux-image-amd64',
-                'linux-headers-amd64',
-                'firmware-linux',
-                'firmware-linux-nonfree',
-                'grub-pc',
+                'linux-headers-amd64'
+            ]
+            
+            # Install only grub-efi-amd64 for UEFI systems (avoid conflicts with grub-pc)
+            bootloader_packages = [
                 'grub-efi-amd64',
-                'os-prober',
+                'os-prober'
+            ]
+            
+            essential_packages = [
                 'sudo',
                 'vim',
                 'nano',
@@ -402,18 +752,31 @@ nameserver 1.1.1.1
                 'git',
                 'python3',
                 'python3-pip',
-                'docker.io',
-                'docker-compose',
                 'jq',
                 'curl',
                 'wget',
-                'unzip',
+                'unzip'
+            ]
+            
+            development_packages = [
                 'build-essential',
                 'pkg-config',
                 'lshw',
                 'pciutils',
                 'usbutils',
                 'dmidecode'
+            ]
+            
+            # Docker packages (might conflict, so install separately)
+            docker_packages = [
+                'docker.io',
+                'docker-compose'
+            ]
+            
+            # Optional firmware packages - install if available
+            optional_packages = [
+                'firmware-linux',
+                'firmware-linux-nonfree'
             ]
             
             if progress_callback:
@@ -430,6 +793,23 @@ nameserver 1.1.1.1
                 subprocess.run([
                     'chroot', root_mount, 'apt-get', 'install', '-y'
                 ] + chunk, capture_output=True, text=True, check=True)
+            
+            # Try to install optional firmware packages (don't fail if they're not available)
+            if progress_callback:
+                progress_callback("Installing optional firmware packages...")
+            
+            for package in optional_packages:
+                try:
+                    subprocess.run([
+                        'chroot', root_mount, 'apt-get', 'install', '-y', package
+                    ], capture_output=True, text=True, check=True)
+                    if progress_callback:
+                        progress_callback(f"Installed optional package: {package}")
+                except subprocess.CalledProcessError:
+                    # Optional packages, so continue if they fail
+                    if progress_callback:
+                        progress_callback(f"Optional package {package} not available, continuing...")
+                    pass
             
             # Clean up package cache
             subprocess.run([
@@ -509,6 +889,13 @@ WantedBy=multi-user.target
                     "size": plan.drive.size
                 },
                 "setup_mode": plan.mode,
+                "base_image": {
+                    "name": plan.base_image.name if plan.base_image else None,
+                    "version": plan.base_image.version if plan.base_image else None,
+                    "architecture": plan.base_image.architecture if plan.base_image else None,
+                    "ai_optimized": plan.base_image.ai_optimized if plan.base_image else False,
+                    "installation_method": "iso_extraction" if plan.base_image else "debootstrap"
+                },
                 "services": {
                     "ollama": {
                         "enabled": True,

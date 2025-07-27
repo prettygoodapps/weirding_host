@@ -8,7 +8,7 @@
 
 # Python and virtual environment settings
 PYTHON := python3
-VENV := venv
+VENV := .venv
 VENV_BIN := $(VENV)/bin
 PIP := $(VENV_BIN)/pip
 PYTHON_VENV := $(VENV_BIN)/python

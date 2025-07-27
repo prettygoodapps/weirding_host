@@ -26,6 +26,7 @@ class PartitionPlan:
     mode: str  # 'full_wipe' or 'dual_use'
     partitions: List[Dict]
     backup_file: Optional[str] = None
+    base_image: Optional[object] = None  # BaseImage object
 
 
 class DrivePartitioner:
@@ -74,18 +75,31 @@ class DrivePartitioner:
         swap_size = min(4 * 1024 * 1024 * 1024, total_size // 32)  # 4GB or 1/32 of drive, whichever is smaller
         models_size = total_size - efi_size - root_size - swap_size - (100 * 1024 * 1024)  # Remaining space minus 100MB buffer
         
+        # Calculate BIOS boot partition size (2MB for GRUB)
+        bios_boot_size = 2 * 1024 * 1024  # 2MB
+        models_size = total_size - efi_size - root_size - swap_size - bios_boot_size - (100 * 1024 * 1024)  # Adjust for BIOS boot partition
+        
         partitions = [
             {
                 'number': 1,
+                'type': 'BIOS boot',
+                'filesystem': 'none',
+                'size': bios_boot_size,
+                'label': 'BIOS_BOOT',
+                'flags': ['bios_grub'],
+                'mount_point': None
+            },
+            {
+                'number': 2,
                 'type': 'EFI System',
                 'filesystem': 'fat32',
                 'size': efi_size,
-                'label': 'WEIRDING_EFI',
+                'label': 'WEIRD_EFI',
                 'flags': ['boot', 'esp'],
                 'mount_point': '/boot/efi'
             },
             {
-                'number': 2,
+                'number': 3,
                 'type': 'Linux filesystem',
                 'filesystem': 'ext4',
                 'size': root_size,
@@ -94,7 +108,7 @@ class DrivePartitioner:
                 'mount_point': '/'
             },
             {
-                'number': 3,
+                'number': 4,
                 'type': 'Linux swap',
                 'filesystem': 'linux-swap',
                 'size': swap_size,
@@ -103,7 +117,7 @@ class DrivePartitioner:
                 'mount_point': 'swap'
             },
             {
-                'number': 4,
+                'number': 5,
                 'type': 'Linux filesystem',
                 'filesystem': 'ext4',
                 'size': models_size,
@@ -389,6 +403,10 @@ class DrivePartitioner:
                         'mkswap', '-L', label, partition_device
                     ], capture_output=True, text=True, check=True)
                     
+                elif filesystem == 'none':
+                    # Skip formatting for BIOS boot partition and similar
+                    continue
+                    
                 else:
                     print(f"Warning: Unknown filesystem type {filesystem} for {partition_device}")
                     
@@ -399,6 +417,7 @@ class DrivePartitioner:
     def _get_partition_type_code(self, partition_type: str) -> str:
         """Get SGDisk type code for partition type."""
         type_codes = {
+            'BIOS boot': 'EF02',
             'EFI System': 'EF00',
             'Linux filesystem': '8300',
             'Linux swap': '8200',

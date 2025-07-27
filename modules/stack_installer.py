@@ -151,13 +151,19 @@ class AIStackInstaller:
             mount_points['root'] = str(root_mount)
             
             # Mount essential filesystems for chroot
-            for fs_type, mount_point in [('proc', 'proc'), ('sys', 'sys'), ('dev', 'dev')]:
+            mount_specs = [
+                ('proc', 'proc', 'proc'),       # filesystem type, device, mount point
+                ('sysfs', 'sysfs', 'sys'),      # filesystem type, device, mount point
+                ('devtmpfs', 'devtmpfs', 'dev') # filesystem type, device, mount point
+            ]
+            
+            for fs_type, device, mount_point in mount_specs:
                 target_dir = root_mount / mount_point
                 target_dir.mkdir(exist_ok=True)
                 subprocess.run([
-                    'mount', '-t', fs_type, fs_type, str(target_dir)
+                    'mount', '-t', fs_type, device, str(target_dir)
                 ], capture_output=True, text=True, check=True)
-                mount_points[fs_type] = str(target_dir)
+                mount_points[mount_point] = str(target_dir)
             
             return mount_points
             

@@ -153,6 +153,7 @@ def run_unit_tests():
     # Load specific test modules
     test_modules = [
         'test_device_setup',
+        'test_base_images',
     ]
     
     for module_name in test_modules:

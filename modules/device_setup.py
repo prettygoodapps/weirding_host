@@ -336,13 +336,19 @@ class DriveDetector:
                         'e2label', partition_device, sanitized_label
                     ], capture_output=True, text=True, check=True)
                     
-                elif fstype in ['fat32', 'vfat', 'exfat']:
+                elif fstype in ['fat32', 'vfat']:
                     # Use fatlabel for FAT filesystems - convert to uppercase for compatibility
                     upper_label = sanitized_label.upper()
                     result = subprocess.run([
                         'fatlabel', partition_device, upper_label
                     ], capture_output=True, text=True, check=True)
                     sanitized_label = upper_label  # Update for return message
+                    
+                elif fstype == 'exfat':
+                    # Use exfatlabel for exFAT filesystems
+                    result = subprocess.run([
+                        'exfatlabel', partition_device, sanitized_label
+                    ], capture_output=True, text=True, check=True)
                     
                 elif fstype == 'ntfs':
                     # Use ntfslabel for NTFS filesystems
