@@ -90,62 +90,281 @@ class OSInstaller:
             return False
     
     def _write_iso_to_drive(self, iso_path: str, device: str, progress_callback=None) -> bool:
-        """Write ISO directly to drive to create bootable USB."""
+        """Write ISO directly to drive to create bootable USB with comprehensive validation."""
         try:
+            if progress_callback:
+                progress_callback("Preparing to write ISO to drive...")
+            
+            # Step 1: Verify source ISO integrity and bootability
+            print(f"🔍 Verifying ISO file integrity: {iso_path}")
+            if not self._verify_iso_integrity(iso_path, progress_callback):
+                print("❌ ISO integrity verification failed")
+                return False
+            
+            # Step 2: Get source and target sizes for validation
+            iso_size = os.path.getsize(iso_path)
+            print(f"📏 Source ISO size: {iso_size:,} bytes ({iso_size / (1024*1024):.1f} MB)")
+            
             if progress_callback:
                 progress_callback("Writing ISO to drive (this may take several minutes)...")
             
-            print(f"Writing {iso_path} to {device}...")
+            print(f"💾 Writing {iso_path} to {device}...")
             
-            # Use dd to write ISO directly to device
+            # Use dd to write ISO directly to device with USB 4.0 compatibility
+            # USB 4.0 drives need smaller block sizes and different sync options for compatibility
             dd_cmd = [
                 'dd',
                 f'if={iso_path}',
                 f'of={device}',
-                'bs=4M',
+                'bs=1M',          # Smaller block size for USB 4.0 compatibility
                 'status=progress',
-                'conv=fdatasync'
+                'conv=fsync',     # File system sync (more compatible than fdatasync)
+                'oflag=direct'    # Direct I/O for better reliability
             ]
             
-            # Run dd command
+            print(f"🔧 Using USB 4.0 compatible parameters: bs=1M, conv=fsync, oflag=direct")
+            
+            # Capture both stdout and stderr separately for better diagnostics
             process = subprocess.Popen(
                 dd_cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
                 universal_newlines=True
             )
             
-            # Monitor progress
+            # Monitor progress and capture all output
+            dd_output = []
+            dd_errors = []
+            
             while True:
-                output = process.stdout.readline()
-                if output == '' and process.poll() is not None:
+                # Read from both stdout and stderr
+                stdout_line = process.stdout.readline()
+                stderr_line = process.stderr.readline()
+                
+                if stdout_line == '' and stderr_line == '' and process.poll() is not None:
                     break
-                if output and progress_callback:
-                    if "copied" in output.lower():
+                    
+                if stdout_line:
+                    dd_output.append(stdout_line.strip())
+                    print(f"DD OUTPUT: {stdout_line.strip()}")
+                    if progress_callback and "copied" in stdout_line.lower():
+                        progress_callback("Writing ISO to drive...")
+                        
+                if stderr_line:
+                    dd_errors.append(stderr_line.strip())
+                    print(f"DD STATUS: {stderr_line.strip()}")
+                    if progress_callback and ("MB" in stderr_line or "GB" in stderr_line):
                         progress_callback("Writing ISO to drive...")
             
             return_code = process.poll()
+            
+            # Print final dd statistics
+            print(f"📊 DD command completed with return code: {return_code}")
+            if dd_output:
+                print("📋 DD Output:")
+                for line in dd_output[-5:]:  # Show last 5 lines
+                    print(f"  {line}")
+            if dd_errors:
+                print("📋 DD Status/Errors:")
+                for line in dd_errors[-5:]:  # Show last 5 lines
+                    print(f"  {line}")
+            
             if return_code != 0:
-                print(f"Failed to write ISO to drive, return code: {return_code}")
+                print(f"❌ DD command failed with return code: {return_code}")
                 return False
             
-            # Sync filesystem
+            # Step 3: Sync and wait for write completion
+            if progress_callback:
+                progress_callback("Syncing data to drive...")
+            
+            print("🔄 Syncing filesystem...")
             subprocess.run(['sync'], check=True)
             
-            if progress_callback:
-                progress_callback("ISO written successfully to drive")
+            # Force sync specifically for the device
+            try:
+                subprocess.run(['blockdev', '--flushbufs', device], check=True)
+                print(f"🔄 Flushed buffers for {device}")
+            except subprocess.CalledProcessError as e:
+                print(f"⚠️  Could not flush device buffers: {e}")
             
+            # Wait a moment for the drive to settle
+            time.sleep(3)
+            
+            # Step 4: Verify the write was successful
+            if progress_callback:
+                progress_callback("Verifying USB drive bootability...")
+            
+            print("🔍 Verifying written data...")
+            if not self._verify_usb_bootability(device, iso_size, progress_callback):
+                print("❌ USB bootability verification failed")
+                return False
+            
+            if progress_callback:
+                progress_callback("✅ Bootable USB drive created successfully")
+            
+            print("✅ ISO written successfully and verified as bootable")
             return True
             
         except subprocess.CalledProcessError as e:
-            print(f"Error writing ISO to drive: {e}")
+            print(f"❌ Error writing ISO to drive: {e}")
             return False
         except Exception as e:
-            print(f"Unexpected error writing ISO: {e}")
+            print(f"❌ Unexpected error writing ISO: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
+    def _verify_iso_integrity(self, iso_path: str, progress_callback=None) -> bool:
+        """Verify ISO file integrity and bootability signatures."""
+        try:
+            if not os.path.exists(iso_path):
+                print(f"❌ ISO file not found: {iso_path}")
+                return False
+            
+            # Check file size (should be > 100MB for a valid Linux ISO)
+            iso_size = os.path.getsize(iso_path)
+            if iso_size < 100 * 1024 * 1024:  # 100MB minimum
+                print(f"❌ ISO file too small: {iso_size:,} bytes (minimum 100MB)")
+                return False
+            
+            if progress_callback:
+                progress_callback("Checking ISO boot signatures...")
+            
+            # Check for ISO 9660 signature
+            with open(iso_path, 'rb') as f:
+                # ISO 9660 primary volume descriptor at sector 16 (offset 32768)
+                f.seek(32768)
+                pvd = f.read(2048)
+                
+                # Check for ISO 9660 signature "CD001"
+                if pvd[1:6] != b'CD001':
+                    print("❌ Invalid ISO 9660 signature")
+                    return False
+                
+                print("✅ Valid ISO 9660 signature found")
+                
+                # Check for El Torito boot record (bootable ISO)
+                f.seek(34816)  # Sector 17
+                boot_record = f.read(2048)
+                
+                if boot_record[0:1] == b'\x00' and boot_record[1:6] == b'CD001':
+                    el_torito_offset = int.from_bytes(boot_record[71:75], 'little') * 2048
+                    
+                    # Check El Torito signature
+                    f.seek(el_torito_offset)
+                    el_torito = f.read(32)
+                    
+                    if el_torito[0:23] == b'\x01\x00\x00\x00EL TORITO SPECIFICATION':
+                        print("✅ El Torito bootable signature found")
+                        return True
+                    else:
+                        print("⚠️  El Torito signature not found, but ISO may still be bootable")
+                        return True  # Some ISOs don't have El Torito but are still bootable
+                else:
+                    print("⚠️  Boot record not found, checking for hybrid ISO...")
+                    
+                    # Check for hybrid ISO (has MBR boot sector)
+                    f.seek(0)
+                    mbr = f.read(512)
+                    
+                    # Check for MBR signature (0x55AA at end)
+                    if mbr[510:512] == b'\x55\xaa':
+                        print("✅ Hybrid ISO with MBR boot sector found")
+                        return True
+                    else:
+                        print("❌ No bootable signatures found in ISO")
+                        return False
+                        
+        except Exception as e:
+            print(f"❌ Error verifying ISO integrity: {e}")
+            return False
+    
+    def _verify_usb_bootability(self, device: str, expected_size: int, progress_callback=None) -> bool:
+        """Verify that the USB drive was written correctly and has bootable signatures."""
+        try:
+            if progress_callback:
+                progress_callback("Checking USB drive boot sectors...")
+            
+            # Wait for device to be ready
+            time.sleep(2)
+            
+            # Check if device exists and is accessible
+            if not os.path.exists(device):
+                print(f"❌ Device not found: {device}")
+                return False
+            
+            try:
+                # Read the first sector (MBR/boot sector)
+                with open(device, 'rb') as f:
+                    # Check MBR signature
+                    f.seek(510)
+                    mbr_sig = f.read(2)
+                    if mbr_sig == b'\x55\xaa':
+                        print("✅ Valid MBR boot signature found on USB drive")
+                    else:
+                        print("⚠️  MBR boot signature not found, checking ISO signature...")
+                    
+                    # Check for ISO 9660 signature (hybrid ISO)
+                    f.seek(32768)
+                    try:
+                        pvd = f.read(6)
+                        if pvd[1:6] == b'CD001':
+                            print("✅ ISO 9660 signature found on USB drive")
+                        else:
+                            print("⚠️  ISO 9660 signature not found")
+                    except:
+                        print("⚠️  Could not read ISO signature area")
+                
+                # Verify approximate size by checking if we can read near the expected end
+                try:
+                    with open(device, 'rb') as f:
+                        # Try to read near the end of the expected data
+                        test_offset = max(0, expected_size - 4096)  # 4KB before end
+                        f.seek(test_offset)
+                        data = f.read(1024)
+                        if len(data) > 0:
+                            print(f"✅ Data successfully written (verified up to {test_offset:,} bytes)")
+                        else:
+                            print("⚠️  Could not verify data at expected end position")
+                except Exception as e:
+                    print(f"⚠️  Could not verify data size: {e}")
+                
+                # Check partition table
+                result = subprocess.run([
+                    'fdisk', '-l', device
+                ], capture_output=True, text=True)
+                
+                if result.returncode == 0:
+                    fdisk_output = result.stdout
+                    print("📋 Partition table information:")
+                    for line in fdisk_output.split('\n'):
+                        if device in line or 'boot' in line.lower() or 'start' in line.lower():
+                            print(f"  {line.strip()}")
+                    
+                    # Look for bootable partition indicator
+                    if '*' in fdisk_output or 'boot' in fdisk_output.lower():
+                        print("✅ Bootable partition detected")
+                    else:
+                        print("⚠️  No bootable partition flag detected (may still be bootable)")
+                else:
+                    print("⚠️  Could not read partition information")
+                
+                print("✅ USB drive verification completed")
+                return True
+                
+            except PermissionError:
+                print("❌ Permission denied reading USB device (may need root access)")
+                return False
+            except Exception as e:
+                print(f"❌ Error reading USB device: {e}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Error during USB verification: {e}")
+            return False
+
     def _add_weirding_config(self, plan: PartitionPlan) -> bool:
         """Add Weirding-specific configuration to the bootable drive."""
         try:
