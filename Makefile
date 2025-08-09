@@ -92,9 +92,10 @@ relabel-drive: permissions ## Relabel an external drive using standalone utility
 	@echo "⚠️  This command requires sudo privileges for drive operations"
 	@sudo ./$(STANDALONE_SCRIPT) relabel-drive
 
-setup-module: permissions ## Set up a Weirding Module using standalone utility (requires sudo)
+setup-module: $(VENV) ## Set up a Weirding Module using development environment (requires sudo)
 	@echo "⚠️  This command requires sudo privileges for drive operations"
-	@sudo ./$(STANDALONE_SCRIPT) setup-module
+	@echo "Using virtual environment for dependencies..."
+	@sudo $(PYTHON_VENV) $(MAIN_SCRIPT) setup-module
 
 version: permissions ## Show version information using standalone utility
 	@./$(STANDALONE_SCRIPT) version

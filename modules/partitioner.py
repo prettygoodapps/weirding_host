@@ -66,19 +66,72 @@ class DrivePartitioner:
         )
     
     def _create_full_wipe_plan(self, drive: DriveInfo, module_name: str = None) -> List[Dict]:
-        """Create partition plan for full wipe mode."""
+        """Create partition plan for full wipe mode with proper GPT overhead accounting."""
         total_size = drive.size
         
-        # Calculate partition sizes
+        # DIAGNOSTIC: Log initial drive size and partition calculation
+        print(f"[DEBUG] Planning partitions for drive {drive.device}")
+        print(f"[DEBUG] Drive total size: {total_size:,} bytes ({total_size // (1024**3):.1f} GB)")
+        
+        # Calculate usable space accounting for GPT overhead upfront
+        drive_size_sectors = total_size // 512
+        primary_gpt_sectors = 2048  # Primary GPT + alignment (1MB)
+        backup_gpt_sectors = 33     # Backup GPT table
+        usable_sectors = drive_size_sectors - primary_gpt_sectors - backup_gpt_sectors
+        usable_size = usable_sectors * 512
+        
+        print(f"[DEBUG] GPT overhead calculation:")
+        print(f"  Drive sectors: {drive_size_sectors:,}")
+        print(f"  Primary GPT + alignment: {primary_gpt_sectors} sectors ({primary_gpt_sectors * 512:,} bytes)")
+        print(f"  Backup GPT: {backup_gpt_sectors} sectors ({backup_gpt_sectors * 512:,} bytes)")
+        print(f"  Usable sectors: {usable_sectors:,}")
+        print(f"  Usable size: {usable_size:,} bytes ({usable_size // (1024**3):.1f} GB)")
+        
+        # Calculate fixed partition sizes
+        bios_boot_size = 2 * 1024 * 1024  # 2MB for GRUB
         efi_size = 512 * 1024 * 1024  # 512MB for EFI boot partition
-        root_size = 20 * 1024 * 1024 * 1024  # 20GB for OS root partition
-        swap_size = min(4 * 1024 * 1024 * 1024, total_size // 32)  # 4GB or 1/32 of drive, whichever is smaller
-        models_size = total_size - efi_size - root_size - swap_size - (100 * 1024 * 1024)  # Remaining space minus 100MB buffer
         
-        # Calculate BIOS boot partition size (2MB for GRUB)
-        bios_boot_size = 2 * 1024 * 1024  # 2MB
-        models_size = total_size - efi_size - root_size - swap_size - bios_boot_size - (100 * 1024 * 1024)  # Adjust for BIOS boot partition
+        # Scale root partition based on drive size (but cap at 20GB for large drives)
+        if usable_size < 64 * 1024**3:  # Less than 64GB usable
+            root_size = 10 * 1024**3  # 10GB for smaller drives
+        else:
+            root_size = 20 * 1024**3  # 20GB for larger drives
         
+        # Calculate swap size (4GB or 1/32 of usable space, whichever is smaller)
+        swap_size = min(4 * 1024**3, usable_size // 32)
+        
+        # Reserve alignment buffer (10MB for partition alignment overhead)
+        alignment_buffer = 10 * 1024 * 1024
+        
+        # Calculate models partition size (remaining usable space)
+        fixed_partitions_size = bios_boot_size + efi_size + root_size + swap_size + alignment_buffer
+        models_size = usable_size - fixed_partitions_size
+        
+        # DIAGNOSTIC: Log individual partition sizes
+        print(f"[DEBUG] Partition size calculations (accounting for GPT overhead):")
+        print(f"  BIOS boot: {bios_boot_size:,} bytes ({bios_boot_size // (1024**2)} MB)")
+        print(f"  EFI: {efi_size:,} bytes ({efi_size // (1024**2)} MB)")
+        print(f"  Root: {root_size:,} bytes ({root_size // (1024**3)} GB)")
+        print(f"  Swap: {swap_size:,} bytes ({swap_size // (1024**3):.1f} GB)")
+        print(f"  Alignment buffer: {alignment_buffer:,} bytes ({alignment_buffer // (1024**2)} MB)")
+        print(f"  Models (remaining): {models_size:,} bytes ({models_size // (1024**3):.1f} GB)")
+        
+        # Sanity check: ensure models partition is reasonable
+        if models_size < 5 * 1024**3:  # Less than 5GB
+            print(f"[ERROR] Models partition too small: {models_size // (1024**3):.1f} GB")
+            print(f"[ERROR] Drive may be too small for full Weirding Module setup")
+            # Reduce root partition as fallback
+            root_size = 8 * 1024**3  # 8GB minimum
+            models_size = usable_size - (bios_boot_size + efi_size + root_size + swap_size + alignment_buffer)
+            print(f"[FALLBACK] Reduced root to {root_size // (1024**3)} GB, models now {models_size // (1024**3):.1f} GB")
+        
+        # DIAGNOSTIC: Check total allocation against usable space
+        total_allocated = bios_boot_size + efi_size + root_size + swap_size + models_size
+        print(f"[DEBUG] Total allocated: {total_allocated:,} bytes ({total_allocated // (1024**3):.1f} GB)")
+        print(f"[DEBUG] Usable space: {usable_size:,} bytes ({usable_size // (1024**3):.1f} GB)")
+        print(f"[DEBUG] Remaining for alignment: {usable_size - total_allocated:,} bytes")
+        
+        # Create partition layout with calculated sizes
         partitions = [
             {
                 'number': 1,
@@ -126,6 +179,15 @@ class DrivePartitioner:
                 'mount_point': '/opt/models'
             }
         ]
+        
+        # Final validation
+        total_partition_size = sum(p['size'] for p in partitions)
+        if total_partition_size > usable_size:
+            print(f"[ERROR] Total partition size {total_partition_size:,} exceeds usable space {usable_size:,}")
+            raise ValueError("Partition plan exceeds available space")
+        
+        print(f"[DEBUG] Partition plan created successfully")
+        print(f"[DEBUG] {len(partitions)} partitions, total size: {total_partition_size:,} bytes")
         
         return partitions
     
@@ -294,9 +356,12 @@ class DrivePartitioner:
             return False
     
     def _apply_full_wipe_partitioning(self, plan: PartitionPlan, progress_callback=None) -> bool:
-        """Apply full wipe partitioning using sgdisk."""
+        """Apply full wipe partitioning using sgdisk with proper GPT space handling."""
         try:
             device = plan.drive.device
+            
+            # DIAGNOSTIC: Log drive size and partition calculations
+            print(f"[DEBUG] Drive {device}: Total size = {plan.drive.size:,} bytes ({plan.drive.size // (1024**3):.1f} GB)")
             
             # Clear existing partition table and create new GPT
             if progress_callback:
@@ -305,18 +370,64 @@ class DrivePartitioner:
             subprocess.run(['sgdisk', '--zap-all', device], capture_output=True, text=True, check=True)
             subprocess.run(['sgdisk', '--clear', device], capture_output=True, text=True, check=True)
             
-            # Create partitions
-            current_sector = 2048  # Start after GPT header
+            # Calculate usable space accounting for GPT overhead
+            drive_size_sectors = plan.drive.size // 512
+            backup_gpt_sectors = 33  # GPT backup table requires 33 sectors
+            usable_sectors = drive_size_sectors - backup_gpt_sectors
+            usable_bytes = usable_sectors * 512
             
-            for partition in plan.partitions:
+            print(f"[DEBUG] Drive total sectors: {drive_size_sectors:,}")
+            print(f"[DEBUG] Backup GPT sectors reserved: {backup_gpt_sectors}")
+            print(f"[DEBUG] Usable sectors: {usable_sectors:,}")
+            print(f"[DEBUG] Usable bytes: {usable_bytes:,} ({usable_bytes // (1024**3):.1f} GB)")
+            
+            # Recalculate last partition size to fit within usable space
+            total_fixed_partitions_size = sum(p['size'] for p in plan.partitions[:-1])
+            available_for_last = usable_bytes - 2048 * 512 - total_fixed_partitions_size  # Account for starting sector
+            
+            if available_for_last < plan.partitions[-1]['size']:
+                original_size = plan.partitions[-1]['size']
+                plan.partitions[-1]['size'] = available_for_last
+                print(f"[WARNING] Adjusted last partition from {original_size:,} bytes to {available_for_last:,} bytes")
+                print(f"[WARNING] Space saved: {original_size - available_for_last:,} bytes ({(original_size - available_for_last)/(1024**3):.1f} GB)")
+            
+            # Create partitions with proper alignment (1MB boundaries)
+            current_sector = 2048  # Start after GPT header (already 1MB aligned)
+            
+            for i, partition in enumerate(plan.partitions):
                 if progress_callback:
                     progress_callback(f"Creating partition {partition['number']}: {partition['label']}")
                 
-                # Calculate partition size in sectors (512 bytes per sector)
-                size_sectors = partition['size'] // 512
-                end_sector = current_sector + size_sectors - 1
+                # Calculate partition size in sectors with proper rounding
+                size_bytes = partition['size']
+                size_sectors = (size_bytes + 511) // 512  # Round up to next sector
                 
-                # Create partition
+                # Align to 1MB boundaries (2048 sectors = 1MB) for optimal performance
+                if partition['type'] != 'BIOS boot':  # BIOS boot partition doesn't need alignment
+                    alignment_sectors = 2048
+                    size_sectors = ((size_sectors + alignment_sectors - 1) // alignment_sectors) * alignment_sectors
+                
+                end_sector = current_sector + size_sectors - 1
+                actual_size_bytes = size_sectors * 512
+                
+                print(f"[DEBUG] Partition {partition['number']} ({partition['label']}):")
+                print(f"  Requested size: {size_bytes:,} bytes ({size_bytes // (1024**2):.1f} MB)")
+                print(f"  Aligned sectors: {size_sectors:,}")
+                print(f"  Sector range: {current_sector} - {end_sector}")
+                print(f"  Actual size: {actual_size_bytes:,} bytes ({actual_size_bytes // (1024**2):.1f} MB)")
+                
+                # Final safety check for last partition
+                if i == len(plan.partitions) - 1:
+                    if end_sector > usable_sectors:
+                        print(f"[ERROR] Last partition still extends beyond usable space!")
+                        print(f"[ERROR] End sector {end_sector} > usable sectors {usable_sectors}")
+                        # Force fit within usable space
+                        end_sector = usable_sectors
+                        size_sectors = end_sector - current_sector + 1
+                        actual_size_bytes = size_sectors * 512
+                        print(f"[FIXED] Adjusted to end at sector {end_sector}, size: {actual_size_bytes:,} bytes")
+                
+                # Create partition using sgdisk
                 cmd = [
                     'sgdisk',
                     f"--new={partition['number']}:{current_sector}:{end_sector}",
@@ -325,18 +436,30 @@ class DrivePartitioner:
                     device
                 ]
                 
-                subprocess.run(cmd, capture_output=True, text=True, check=True)
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
                 
-                # Set flags if needed
+                # Set partition flags if needed
                 for flag in partition.get('flags', []):
                     if flag == 'boot':
-                        subprocess.run(['sgdisk', f"--attributes={partition['number']}:set:2", device], 
+                        subprocess.run(['sgdisk', f"--attributes={partition['number']}:set:2", device],
                                      capture_output=True, text=True, check=True)
-                    elif flag == 'esp':
-                        # EFI System Partition type is already set by typecode
-                        pass
+                    elif flag == 'bios_grub':
+                        subprocess.run(['sgdisk', f"--attributes={partition['number']}:set:0", device],
+                                     capture_output=True, text=True, check=True)
                 
                 current_sector = end_sector + 1
+            
+            # Verify final partition table
+            result = subprocess.run(['sgdisk', '--verify', device], capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"[WARNING] GPT verification failed: {result.stderr}")
+            else:
+                print(f"[DEBUG] GPT partition table verified successfully")
+            
+            # DIAGNOSTIC: Print final partition table
+            result = subprocess.run(['sgdisk', '--print', device], capture_output=True, text=True)
+            print(f"[DEBUG] Final partition table:")
+            print(result.stdout)
             
             return True
             

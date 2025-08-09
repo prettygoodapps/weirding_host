@@ -150,9 +150,13 @@ class DriveDetector:
         # Remove any whitespace
         size_str = size_str.strip()
         
+        # DIAGNOSTIC: Log size parsing
+        print(f"[DEBUG] Parsing size string: '{size_str}'")
+        
         # Extract number and unit
         match = re.match(r'([0-9.]+)([KMGTPE]?)', size_str.upper())
         if not match:
+            print(f"[DEBUG] Failed to parse size string: '{size_str}'")
             return 0
         
         number = float(match.group(1))
@@ -168,7 +172,12 @@ class DriveDetector:
             'E': 1024**6
         }
         
-        return int(number * multipliers.get(unit, 1))
+        size_bytes = int(number * multipliers.get(unit, 1))
+        
+        # DIAGNOSTIC: Log conversion result
+        print(f"[DEBUG] Size conversion: {number} {unit} = {size_bytes:,} bytes ({size_bytes // (1024**3):.1f} GB)")
+        
+        return size_bytes
     
     def get_external_drives(self) -> List[DriveInfo]:
         """
